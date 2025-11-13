@@ -106,6 +106,9 @@ jobs:
       - name: Install ninja
         run: brew install ninja
 
+      - name: Install NNG
+        run: brew install nng
+
       # ==== RESTORE CACHE ====
       - name: Restore buildcache Cache
         uses: actions/cache/restore@v4
