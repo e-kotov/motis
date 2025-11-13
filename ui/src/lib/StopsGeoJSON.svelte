@@ -64,7 +64,7 @@
 				})
 		};
 	}
-	const geojson = $derived(stopsToGeoJSON(itinerary.legs));
+	const geojson = $derived(stopsToGeoJSON(itinerary.legs ?? []));
 </script>
 
 <GeoJSON id="stops" data={geojson}>

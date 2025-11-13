@@ -22,9 +22,10 @@
 	}
 
 	function itineraryToGeoJSON(i: Itinerary): GeoJSON.GeoJSON {
+		const legs = i.legs ?? [];
 		return {
 			type: 'FeatureCollection',
-			features: i.legs.flatMap((l) => {
+			features: legs.flatMap((l) => {
 				if (l.steps) {
 					const color = isIndividualTransport(l.mode)
 						? getIndividualModeColor(l.mode)

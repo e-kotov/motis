@@ -2,7 +2,7 @@
 	import { Button, type ButtonProps } from '$lib/components/ui/button';
 	import { formatDurationSec } from '$lib/formatDuration';
 	import { getModeStyle, routeColor } from './modeStyle';
-	import type { Itinerary } from '@motis-project/motis-client';
+	import type { Itinerary, Leg } from '@motis-project/motis-client';
 
 	const {
 		d,
@@ -11,11 +11,27 @@
 		d: Itinerary;
 	} & ButtonProps = $props();
 
+	const legs = d.legs ?? [];
 	const modeStyles = [
-		...new Map(d.legs.map((l) => [JSON.stringify(getModeStyle(l)), getModeStyle(l)])).values()
+		...new Map(legs.map((l) => [JSON.stringify(getModeStyle(l)), getModeStyle(l)])).values()
 	];
 
-	const leg = d.legs.find((leg) => leg.mode !== 'WALK') ?? d.legs[0]!;
+	const fallbackPlace = { name: 'UNKNOWN', lat: 0, lon: 0 } as const;
+	const fallbackLeg: Leg = {
+		mode: 'WALK',
+		from: fallbackPlace,
+		to: fallbackPlace,
+		duration: d.duration,
+		startTime: d.startTime,
+		endTime: d.endTime,
+		scheduledStartTime: d.startTime,
+		scheduledEndTime: d.endTime,
+		realTime: false,
+		scheduled: false,
+		legGeometry: { points: '', precision: 6, length: 0 }
+	};
+
+	const leg = legs.find((leg) => leg.mode !== 'WALK') ?? legs[0] ?? fallbackLeg;
 </script>
 
 <Button variant="child" {...restProps}>

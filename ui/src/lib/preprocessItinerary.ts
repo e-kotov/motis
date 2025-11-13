@@ -3,6 +3,9 @@ import type { Location } from '$lib/Location';
 import polyline from '@mapbox/polyline';
 
 export const joinInterlinedLegs = (it: Itinerary) => {
+	if (!it.legs) {
+		return;
+	}
 	const joinedLegs = [];
 	for (let i = 0; i < it.legs.length; i++) {
 		if (it.legs[i].interlineWithPreviousLeg) {
@@ -32,6 +35,9 @@ export const joinInterlinedLegs = (it: Itinerary) => {
 
 export const preprocessItinerary = (from: Location, to: Location) => {
 	const updateItinerary = (it: Itinerary) => {
+		if (!it.legs || it.legs.length === 0) {
+			return;
+		}
 		if (it.legs[0].from.name === 'START') {
 			it.legs[0].from.name = from.label!;
 		}

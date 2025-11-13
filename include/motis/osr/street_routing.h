@@ -65,7 +65,8 @@ api::Itinerary dummy_itinerary(api::Place const& from,
                                api::Place const& to,
                                api::ModeEnum,
                                nigiri::unixtime_t const start_time,
-                               nigiri::unixtime_t const end_time);
+                               nigiri::unixtime_t const end_time,
+                               bool with_legs);
 
 api::Itinerary street_routing(osr::ways const&,
                               osr::lookup const&,
@@ -78,6 +79,7 @@ api::Itinerary street_routing(osr::ways const&,
                               std::optional<nigiri::unixtime_t> end_time,
                               double max_matching_distance,
                               osr_parameters const&,
+                              bool with_legs,
                               street_routing_cache_t&,
                               osr::bitvec<osr::node_idx_t>& blocked_mem,
                               unsigned api_version,

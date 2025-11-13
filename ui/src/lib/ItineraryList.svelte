@@ -67,7 +67,7 @@
 	{:then r}
 		{#if r.direct.length !== 0}
 			<div class="my-4 flex flex-wrap gap-x-3 gap-y-3">
-				{#each r.direct as d, i (i)}
+				{#each r.direct.filter((d) => d.legs && d.legs.length) as d, i (i)}
 					<DirectConnection
 						{d}
 						onclick={() => {
@@ -118,26 +118,46 @@
 									<div class="text-base flex justify-around items-start space-x-1 w-full">
 										<div class="overflow-hidden basis-1/4 h-full flex flex-col">
 											<div class="text-xs font-bold uppercase text-slate-400">{t.departure}</div>
-											<Time
-												isRealtime={it.legs[0].realTime}
-												timestamp={it.startTime}
-												scheduledTimestamp={it.legs[0].scheduledStartTime}
-												variant="realtime-show-always"
-												queriedTime={baseQuery?.query.time}
-												timeZone={it.legs[0].from.tz}
-											/>
+											{#if it.legs?.length}
+												<Time
+													isRealtime={it.legs[0].realTime}
+													timestamp={it.startTime}
+													scheduledTimestamp={it.legs[0].scheduledStartTime}
+													variant="realtime-show-always"
+													queriedTime={baseQuery?.query.time}
+													timeZone={it.legs[0].from.tz}
+												/>
+											{:else}
+												<Time
+													isRealtime={false}
+													timestamp={it.startTime}
+													scheduledTimestamp={it.startTime}
+													variant="realtime-show-always"
+													queriedTime={baseQuery?.query.time}
+												/>
+											{/if}
 										</div>
 										<Separator orientation="vertical" />
 										<div class="overflow-hidden basis-1/4 h-full flex flex-col">
 											<div class="text-xs font-bold uppercase text-slate-400">{t.arrival}</div>
-											<Time
-												isRealtime={it.legs[it.legs.length - 1].realTime}
-												timestamp={it.endTime}
-												scheduledTimestamp={it.legs[it.legs.length - 1].scheduledEndTime}
-												variant="realtime-show-always"
-												queriedTime={it.startTime}
-												timeZone={it.legs[it.legs.length - 1].to.tz}
-											/>
+											{#if it.legs?.length}
+												<Time
+													isRealtime={it.legs[it.legs.length - 1].realTime}
+													timestamp={it.endTime}
+													scheduledTimestamp={it.legs[it.legs.length - 1].scheduledEndTime}
+													variant="realtime-show-always"
+													queriedTime={it.startTime}
+													timeZone={it.legs[it.legs.length - 1].to.tz}
+												/>
+											{:else}
+												<Time
+													isRealtime={false}
+													timestamp={it.endTime}
+													scheduledTimestamp={it.endTime}
+													variant="realtime-show-always"
+													queriedTime={it.startTime}
+												/>
+											{/if}
 										</div>
 										<Separator orientation="vertical" />
 										<div class="overflow-hidden basis-1/4 h-full flex flex-col">
@@ -160,7 +180,7 @@
 									</div>
 									<Separator class="my-2" />
 									<div class="mt-4 flex flex-wrap gap-x-3 gap-y-3">
-										{#each it.legs.filter((l, i) => (i == 0 && l.duration > 1) || (i == it.legs.length - 1 && l.duration > 1) || l.displayName || l.mode != 'WALK') as l, i (i)}
+										{#each (it.legs ?? []).filter((l, i, arr) => (i === 0 && l.duration > 1) || (i === arr.length - 1 && l.duration > 1) || l.displayName || l.mode != 'WALK') as l, i (i)}
 											{@render legSummary(l)}
 										{/each}
 									</div>

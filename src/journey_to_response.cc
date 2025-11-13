@@ -59,12 +59,22 @@ api::ModeEnum to_mode(osr::search_profile const m) {
 }
 
 void cleanup_intermodal(api::Itinerary& i) {
-  if (i.legs_.front().from_.name_ == "END") {
-    i.legs_.front().from_.name_ = "START";
+  if (!i.legs_ || i.legs_->empty()) {
+    return;
   }
-  if (i.legs_.back().to_.name_ == "START") {
-    i.legs_.back().to_.name_ = "END";
+  if (i.legs_->front().from_.name_ == "END") {
+    i.legs_->front().from_.name_ = "START";
   }
+  if (i.legs_->back().to_.name_ == "START") {
+    i.legs_->back().to_.name_ = "END";
+  }
+}
+
+std::vector<api::Leg>& get_or_create_legs(api::Itinerary& i) {
+  if (!i.legs_) {
+    i.legs_.emplace();
+  }
+  return *i.legs_;
 }
 
 struct fare_indices {
@@ -227,6 +237,7 @@ api::Itinerary journey_to_response(
     bool const detailed_transfers,
     bool const with_fares,
     bool const with_scheduled_skipped_stops,
+    bool const with_legs,
     double const timetable_max_matching_distance,
     double const max_matching_distance,
     unsigned const api_version,
@@ -343,10 +354,20 @@ api::Itinerary journey_to_response(
                 })};
           })};
 
+  if (!with_legs) {
+    itinerary.legs_ = std::nullopt;
+    return itinerary;
+  }
+
+  auto& itinerary_legs = get_or_create_legs(itinerary);
+
   auto const append = [&](api::Itinerary&& x) {
-    itinerary.legs_.insert(end(itinerary.legs_),
-                           std::move_iterator{begin(x.legs_)},
-                           std::move_iterator{end(x.legs_)});
+    if (!x.legs_) {
+      return;
+    }
+    itinerary_legs.insert(end(itinerary_legs),
+                          std::move_iterator{begin(*x.legs_)},
+                          std::move_iterator{end(*x.legs_)});
   };
 
   auto const get_first_run_tz = [&]() -> std::optional<std::string> {
@@ -365,7 +386,7 @@ api::Itinerary journey_to_response(
 
   for (auto const [_, j_leg] : utl::enumerate(j.legs_)) {
     auto const pred =
-        itinerary.legs_.empty() ? nullptr : &itinerary.legs_.back();
+        itinerary_legs.empty() ? nullptr : &itinerary_legs.back();
     auto const fallback_tz =
         pred == nullptr ? get_first_run_tz() : pred->to_.tz_;
     auto const from =
@@ -418,7 +439,7 @@ api::Itinerary journey_to_response(
                 auto const [service_day, _] =
                     enter_stop.get_trip_start(n::event_type::kDep);
 
-                auto& leg = itinerary.legs_.emplace_back(api::Leg{
+                auto& leg = itinerary_legs.emplace_back(api::Leg{
                     .mode_ = to_mode(enter_stop.get_clasz(n::event_type::kDep),
                                      api_version),
                     .from_ = to_place(enter_stop, n::event_type::kDep),
@@ -557,12 +578,14 @@ api::Itinerary journey_to_response(
                                j_leg.dep_time_, j_leg.arr_time_,
                                car_transfers ? 250.0
                                              : timetable_max_matching_distance,
-                               osr_params, cache, *blocked_mem, api_version,
+                               osr_params, with_legs, cache, *blocked_mem,
+                               api_version,
                                std::chrono::duration_cast<std::chrono::seconds>(
                                    j_leg.arr_time_ - j_leg.dep_time_) +
                                    std::chrono::minutes{10})
                          : dummy_itinerary(from, to, api::ModeEnum::WALK,
-                                           j_leg.dep_time_, j_leg.arr_time_));
+                                           j_leg.dep_time_, j_leg.arr_time_,
+                                           with_legs));
             },
             [&](n::routing::offset const x) {
               auto out = std::unique_ptr<output>{};
@@ -583,8 +606,8 @@ api::Itinerary journey_to_response(
 
               append(street_routing(
                   *w, *l, e, elevations, from, to, *out, j_leg.dep_time_,
-                  j_leg.arr_time_, max_matching_distance, osr_params, cache,
-                  *blocked_mem, api_version,
+                  j_leg.arr_time_, max_matching_distance, osr_params,
+                  with_legs, cache, *blocked_mem, api_version,
                   std::chrono::duration_cast<std::chrono::seconds>(
                       j_leg.arr_time_ - j_leg.dep_time_) +
                       std::chrono::minutes{5}));

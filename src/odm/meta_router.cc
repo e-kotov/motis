@@ -525,53 +525,57 @@ api::plan_response meta_router::run() {
                 query_.requireCarTransport_ && query_.useRoutedTransfers_,
                 params, query_.pedestrianProfile_, query_.elevationCosts_,
                 query_.joinInterlinedLegs_, query_.detailedTransfers_,
-                query_.withFares_, query_.withScheduledSkippedStops_,
+                query_.withFares_, query_.withScheduledSkippedStops_, true,
                 r_.config_.timetable_.value().max_matching_distance_,
                 query_.maxMatchingDistance_, api_version_,
                 query_.ignorePreTransitRentalReturnConstraints_,
                 query_.ignorePostTransitRentalReturnConstraints_,
                 query_.language_);
 
-            if (response.legs_.front().mode_ == api::ModeEnum::RIDE_SHARING &&
-                response.legs_.size() == 1) {
+            if (!response.legs_ || response.legs_->empty()) {
+              return response;
+            }
+
+            if (response.legs_->front().mode_ == api::ModeEnum::RIDE_SHARING &&
+                response.legs_->size() == 1) {
               for (auto const [i, a] : utl::enumerate(p.direct_ride_sharing_)) {
-                if (a.dep_ == response.legs_.front().startTime_ &&
-                    a.arr_ == response.legs_.front().endTime_) {
-                  response.legs_.front().tripId_ = std::optional{
+                if (a.dep_ == response.legs_->front().startTime_ &&
+                    a.arr_ == response.legs_->front().endTime_) {
+                  response.legs_->front().tripId_ = std::optional{
                       std::to_string(p.direct_ride_sharing_tour_ids_[i])};
                   break;
                 }
               }
               return response;
             }
-            if (response.legs_.front().mode_ == api::ModeEnum::RIDE_SHARING) {
+            if (response.legs_->front().mode_ == api::ModeEnum::RIDE_SHARING) {
               for (auto const [i, a] :
                    utl::enumerate(p.first_mile_ride_sharing_)) {
                 if (a.time_at_start_ ==
-                        response.legs_.front()
+                        response.legs_->front()
                             .startTime_ &&  // not looking at time_at_stop_
                                             // because we would again need to
                                             // take into account the 5 min
                                             // shift...
                     r_.tags_->id(*tt_, a.stop_) ==
-                        response.legs_.front().to_.stopId_) {
-                  response.legs_.front().tripId_ = std::optional{
+                        response.legs_->front().to_.stopId_) {
+                  response.legs_->front().tripId_ = std::optional{
                       std::to_string(p.first_mile_ride_sharing_tour_ids_[i])};
                   break;
                 }
               }
             }
-            if (response.legs_.back().mode_ == api::ModeEnum::RIDE_SHARING) {
+            if (response.legs_->back().mode_ == api::ModeEnum::RIDE_SHARING) {
               for (auto const [i, a] :
                    utl::enumerate(p.last_mile_ride_sharing_)) {
                 if (a.time_at_start_ ==
-                        response.legs_.back()
+                        response.legs_->back()
                             .endTime_ &&  // not looking at time_at_stop_
                                           // because we would again need to take
                                           // into account the 5 min shift...
                     r_.tags_->id(*tt_, a.stop_) ==
-                        response.legs_.back().from_.stopId_) {
-                  response.legs_.back().tripId_ = std::optional{
+                        response.legs_->back().from_.stopId_) {
+                  response.legs_->back().tripId_ = std::optional{
                       std::to_string(p.last_mile_ride_sharing_tour_ids_[i])};
                   break;
                 }
