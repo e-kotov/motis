@@ -208,8 +208,12 @@ void print_short(std::ostream& out, api::Itinerary const& j) {
   out << ", transfers=" << j.transfers_;
 
   out << ", legs=[\n";
+  if (!j.legs_) {
+    out << "    <none>\n]";
+    return;
+  }
   auto first = true;
-  for (auto const& leg : j.legs_) {
+  for (auto const& leg : *j.legs_) {
     if (!first) {
       out << ",\n    ";
     } else {

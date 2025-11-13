@@ -1275,9 +1275,9 @@ export type Itinerary = {
      */
     transfers: number;
     /**
-     * Journey legs
+     * Journey legs. Omitted when `withLegs=false` was requested.
      */
-    legs: Array<Leg>;
+    legs?: Array<Leg>;
     /**
      * Fare information
      */
@@ -1862,6 +1862,10 @@ export type PlanData = {
          * Optional. Include intermediate stops where passengers can not alight/board according to schedule.
          */
         withScheduledSkippedStops?: boolean;
+        /**
+         * Optional. Set to false to omit detailed legs from itineraries to minimize response size.
+         */
+        withLegs?: boolean;
     };
 };
 

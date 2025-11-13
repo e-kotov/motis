@@ -279,7 +279,10 @@ int extract(int ac, char** av) {
     fmt::println("found {} itineraries", res.itineraries_.size());
 
     for (auto const& i : res.itineraries_) {
-      for (auto const& l : i.legs_) {
+      if (!i.legs_) {
+        continue;
+      }
+      for (auto const& l : *i.legs_) {
         add_important_stop(l.from_);
         add_important_stop(l.to_);
 

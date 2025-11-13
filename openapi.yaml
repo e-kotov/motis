@@ -823,6 +823,14 @@ paths:
             type: boolean
             default: false
 
+        - name: withLegs
+          in: query
+          required: false
+          description: Optional. Set to false to omit detailed legs from itineraries to minimize response size and conversion time.
+          schema:
+            type: boolean
+            default: true
+
         - name: language
           in: query
           required: false
@@ -3464,7 +3472,6 @@ components:
         - startTime
         - endTime
         - transfers
-        - legs
       properties:
         duration:
           description: journey duration in seconds
@@ -3481,7 +3488,7 @@ components:
           type: integer
           description: The number of transfers this trip has.
         legs:
-          description: Journey legs
+          description: Journey legs. Omitted when `withLegs=false` was requested.
           type: array
           items:
             $ref: '#/components/schemas/Leg'

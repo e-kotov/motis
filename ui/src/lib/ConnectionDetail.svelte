@@ -26,7 +26,8 @@
 	} = $props();
 
 	const isRelevantLeg = (l: Leg) => l.duration !== 0 || l.displayName;
-	const lastLeg = $derived(itinerary.legs.findLast(isRelevantLeg));
+	const legs = $derived(itinerary.legs ?? []);
+	const lastLeg = $derived(legs.findLast(isRelevantLeg));
 </script>
 
 {#snippet stopTimes(
@@ -247,12 +248,13 @@
 {/snippet}
 
 <div class="text-lg max-w-full">
-	{#each itinerary.legs as l, i (i)}
-		{@const isLast = i == itinerary.legs.length - 1}
-		{@const isLastPred = i == itinerary.legs.length - 2}
-		{@const pred = i == 0 ? undefined : itinerary.legs[i - 1]}
-		{@const next = isLast ? undefined : itinerary.legs[i + 1]}
-		{@const prevTransitLeg = itinerary.legs.slice(0, i).find((l) => l.tripId)}
+	{#if legs.length}
+		{#each legs as l, i (i)}
+			{@const isLast = i == legs.length - 1}
+			{@const isLastPred = i == legs.length - 2}
+			{@const pred = i == 0 ? undefined : legs[i - 1]}
+			{@const next = isLast ? undefined : legs[i + 1]}
+			{@const prevTransitLeg = legs.slice(0, i).find((leg) => leg.tripId)}
 		{#if l.displayName}
 			<div class="w-full flex justify-between items-center space-x-1">
 				<Route {onClickTrip} {l} />
@@ -401,21 +403,26 @@
 				{/if}
 			</div>
 		{/if}
-	{/each}
-	<div class="relative pl-4 md:pl-6 left-5">
-		<div
-			class="absolute left-[-9px] w-[15px] h-[15px] rounded-full"
-			style={routeColor(lastLeg!)}
-		></div>
-		<div class="relative top-[-6px] mb-[-6px]">
-			{@render stopTimes(
-				lastLeg!.endTime,
-				lastLeg!.scheduledEndTime,
-				lastLeg!.realTime,
-				lastLeg!.to,
-				lastLeg!.mode,
-				1
-			)}
-		</div>
-	</div>
+		{/each}
+		{#if lastLeg}
+			<div class="relative pl-4 md:pl-6 left-5">
+				<div
+					class="absolute left-[-9px] w-[15px] h-[15px] rounded-full"
+					style={routeColor(lastLeg)}
+				></div>
+				<div class="relative top-[-6px] mb-[-6px]">
+					{@render stopTimes(
+						lastLeg.endTime,
+						lastLeg.scheduledEndTime,
+						lastLeg.realTime,
+						lastLeg.to,
+						lastLeg.mode,
+						1
+					)}
+				</div>
+			</div>
+		{/if}
+	{:else}
+		<div class="px-4 py-2 text-sm text-slate-500">Leg details unavailable.</div>
+	{/if}
 </div>

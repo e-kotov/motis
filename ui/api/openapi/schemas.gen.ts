@@ -1574,7 +1574,7 @@ and the inner array as OR (you can choose which ticket to buy)
 
 export const ItinerarySchema = {
     type: 'object',
-    required: ['duration', 'startTime', 'endTime', 'transfers', 'legs'],
+    required: ['duration', 'startTime', 'endTime', 'transfers'],
     properties: {
         duration: {
             description: 'journey duration in seconds',
@@ -1595,7 +1595,7 @@ export const ItinerarySchema = {
             description: 'The number of transfers this trip has.'
         },
         legs: {
-            description: 'Journey legs',
+            description: 'Journey legs. Omitted when `withLegs=false` was requested.',
             type: 'array',
             items: {
                 '$ref': '#/components/schemas/Leg'

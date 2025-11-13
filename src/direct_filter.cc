@@ -12,10 +12,20 @@ namespace n = nigiri;
 
 void direct_filter(std::vector<api::Itinerary> const& direct,
                    std::vector<n::routing::journey>& journeys) {
+  auto const has_legs = [](api::Itinerary const& it) {
+    return it.legs_ && !it.legs_->empty();
+  };
+
+  if (direct.empty() || !has_legs(direct.front())) {
+    return;
+  }
+
   auto const get_direct_duration = [&](auto const transport_mode_id) {
     auto const m = static_cast<api::ModeEnum>(transport_mode_id);
     auto const i = utl::find_if(
-        direct, [&](auto const& d) { return d.legs_.front().mode_ == m; });
+        direct, [&](auto const& d) {
+          return has_legs(d) && d.legs_->front().mode_ == m;
+        });
     return i != end(direct)
                ? n::duration_t{std::chrono::round<std::chrono::minutes>(
                      std::chrono::seconds{i->duration_})}

@@ -172,14 +172,20 @@ api::Itinerary dummy_itinerary(api::Place const& from,
                                api::Place const& to,
                                api::ModeEnum const mode,
                                n::unixtime_t const start_time,
-                               n::unixtime_t const end_time) {
+                               n::unixtime_t const end_time,
+                               bool const with_legs) {
   auto itinerary = api::Itinerary{
       .duration_ = std::chrono::duration_cast<std::chrono::seconds>(end_time -
                                                                     start_time)
                        .count(),
       .startTime_ = start_time,
       .endTime_ = end_time};
-  auto& leg = itinerary.legs_.emplace_back(api::Leg{
+  if (!with_legs) {
+    itinerary.legs_ = std::nullopt;
+    return itinerary;
+  }
+  itinerary.legs_.emplace();
+  auto& leg = itinerary.legs_->emplace_back(api::Leg{
       .mode_ = mode,
       .from_ = from,
       .to_ = to,
@@ -210,6 +216,7 @@ api::Itinerary street_routing(osr::ways const& w,
                               std::optional<n::unixtime_t> const end_time,
                               double const max_matching_distance,
                               osr_parameters const& osr_params,
+                              bool const with_legs,
                               street_routing_cache_t& cache,
                               osr::bitvec<osr::node_idx_t>& blocked_mem,
                               unsigned const api_version,
@@ -241,7 +248,7 @@ api::Itinerary street_routing(osr::ways const& w,
       return {};
     }
     return dummy_itinerary(from_place, to_place, out.get_mode(), *start_time,
-                           *end_time);
+                           *end_time, with_legs);
   }
 
   auto const deduced_start_time =
@@ -256,6 +263,14 @@ api::Itinerary street_routing(osr::ways const& w,
       .endTime_ = end_time ? *end_time
                            : *start_time + std::chrono::seconds{path->cost_},
       .transfers_ = 0};
+
+  if (!with_legs) {
+    itinerary.legs_ = std::nullopt;
+    return itinerary;
+  }
+
+  itinerary.legs_.emplace();
+  auto& itinerary_legs = *itinerary.legs_;
 
   auto t =
       std::chrono::time_point_cast<std::chrono::seconds>(deduced_start_time);
@@ -283,7 +298,7 @@ api::Itinerary street_routing(osr::ways const& w,
           }
         }
 
-        auto& leg = itinerary.legs_.emplace_back(api::Leg{
+        auto& leg = itinerary_legs.emplace_back(api::Leg{
             .mode_ = out.get_mode() == api::ModeEnum::ODM
                          ? api::ModeEnum::ODM
                          : (out.get_mode() == api::ModeEnum::RIDE_SHARING
@@ -318,11 +333,11 @@ api::Itinerary street_routing(osr::ways const& w,
         pred_end_time = t;
       });
 
-  if (end_time && !itinerary.legs_.empty()) {
-    auto& last = itinerary.legs_.back();
+  if (end_time && !itinerary_legs.empty()) {
+    auto& last = itinerary_legs.back();
     last.to_.arrival_ = last.to_.scheduledArrival_ = last.endTime_ =
         last.scheduledEndTime_ = *end_time;
-    for (auto& leg : itinerary.legs_) {
+    for (auto& leg : itinerary_legs) {
       leg.duration_ = (leg.endTime_.time_ - leg.startTime_.time_).count();
     }
   }

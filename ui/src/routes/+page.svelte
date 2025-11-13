@@ -441,10 +441,14 @@
 	}
 
 	const flyToItineraries = (itineraries: Itinerary[], map: maplibregl.Map) => {
-		const start = maplibregl.LngLat.convert(itineraries[0].legs[0].from);
+		const firstLeg = itineraries[0].legs?.[0];
+		if (!firstLeg) {
+			return;
+		}
+		const start = maplibregl.LngLat.convert(firstLeg.from);
 		const box = new maplibregl.LngLatBounds(start, start);
 		itineraries.forEach((i) => {
-			i.legs.forEach((l) => {
+			(i.legs ?? []).forEach((l) => {
 				box.extend(l.from);
 				box.extend(l.to);
 				l.intermediateStops?.forEach((x) => {
