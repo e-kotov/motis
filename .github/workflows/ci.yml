@@ -9,6 +9,7 @@ on:
     types:
       - published
       - prereleased
+  workflow_dispatch:  # Enables manual triggering from any branch
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -167,7 +168,7 @@ jobs:
       - name: Upload Distribution
         uses: actions/upload-artifact@v4
         with:
-          name: motis-${{ matrix.config.preset }}
+          name: motis-${{ matrix.config.preset }}-${{ github.ref_name }}
           path: motis-${{ matrix.config.preset }}.tar.bz2
 
       # ==== RELEASE ====
