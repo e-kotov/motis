@@ -119,11 +119,23 @@ int main(int ac, char** av) {
       try {
         auto data_path = fs::path{"data"};
         auto log_lvl = std::string{};
+        auto srv_settings = server_settings{};
 
         auto desc = po::options_description{"Server Options"};
         add_data_path_opt(desc, data_path);
         add_log_level_opt(desc, log_lvl);
         add_help_opt(desc);
+#if MOTIS_ENABLE_IPC
+        auto ipc_enable_flag = false;
+        auto ipc_address = srv_settings.ipc_address;
+        desc.add_options()("ipc.enable",
+                           po::value(&ipc_enable_flag)
+                               ->default_value(false)
+                               ->implicit_value(true),
+                           "Enable the experimental NNG IPC server")(
+            "ipc.address", po::value(&ipc_address)->default_value(ipc_address),
+            "IPC address, e.g. ipc:///tmp/motis-ipc.sock");
+#endif
         auto vm = parse_opt(ac, av, desc);
         if (vm.count("help")) {
           std::cout << desc << "\n";
@@ -139,7 +151,12 @@ int main(int ac, char** av) {
             (return_value = set_log_level(std::move(log_lvl)))) {
           break;
         }
-        return_value = server(data{data_path, c}, c, motis_version);
+#if MOTIS_ENABLE_IPC
+        srv_settings.ipc_enable = ipc_enable_flag;
+        srv_settings.ipc_address = std::move(ipc_address);
+#endif
+        return_value =
+            server(data{data_path, c}, c, srv_settings, motis_version);
       } catch (std::exception const& e) {
         std::cerr << "unable to start server: " << e.what() << "\n";
         return_value = 1;

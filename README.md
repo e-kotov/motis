@@ -66,6 +66,19 @@ Features can be turned on and off as needed.
 This will preprocess the input files and create a `data` folder.
 After that, it will start a server.
 
+### Local IPC (experimental)
+
+When MOTIS is built with IPC support (default), you can expose a local
+[NNG](https://nng.nanomsg.org/) reply socket alongside the HTTP API:
+
+```bash
+./motis server --ipc.enable=1 --ipc.address=ipc:///tmp/motis-ipc.sock
+```
+
+The IPC transport is intended for high-throughput clients that run on the same
+host (R, Python, etc.). Do not expose the socket over TCP unless you add your
+own security layer.
+
 > [!IMPORTANT]
 > Ensure a valid timetable is used. If the timetable is outdated, it will not contain any trips to consider for upcoming dates.
 

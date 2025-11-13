@@ -5,6 +5,16 @@ project(motis LANGUAGES C CXX ASM)
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
 option(MOTIS_MIMALLOC "use mimalloc" OFF)
+option(MOTIS_ENABLE_IPC "Enable NNG IPC server" ON)
+
+set(MOTIS_ENABLE_IPC_INT 0)
+if (MOTIS_ENABLE_IPC)
+    find_package(nng QUIET)
+    if (NOT nng_FOUND)
+        message(FATAL_ERROR "MOTIS_ENABLE_IPC=ON but nng not found")
+    endif ()
+    set(MOTIS_ENABLE_IPC_INT 1)
+endif ()
 
 set(MOTIS_STACKTRACE "AUTO" CACHE STRING "Enable stacktrace support (AUTO, ON, OFF)")
 set_property(CACHE MOTIS_STACKTRACE PROPERTY STRINGS "AUTO;ON;OFF")
@@ -115,6 +125,7 @@ add_library(motislib ${motislib-files})
 target_include_directories(motislib PUBLIC include)
 target_compile_features(motislib PUBLIC cxx_std_23)
 target_compile_options(motislib PRIVATE ${motis-compile-options})
+target_compile_definitions(motislib PUBLIC MOTIS_ENABLE_IPC=${MOTIS_ENABLE_IPC_INT})
 target_link_libraries(motislib
     nigiri
     osr
@@ -137,6 +148,9 @@ target_link_libraries(motislib
     Boost::stacktrace
     "$<${_MOTIS_STACKTRACE_ON}:Boost::stacktrace_from_exception>"
 )
+if (MOTIS_ENABLE_IPC)
+    target_link_libraries(motislib PUBLIC nng::nng)
+endif ()
 
 
 # --- EXE ---
@@ -150,6 +164,7 @@ file(GLOB_RECURSE motis-files exe/*.cc)
 add_executable(motis ${motis-files})
 target_compile_features(motis PUBLIC cxx_std_23)
 target_compile_options(motis PRIVATE ${motis-compile-options})
+target_compile_definitions(motis PUBLIC MOTIS_ENABLE_IPC=${MOTIS_ENABLE_IPC_INT})
 set_source_files_properties(exe/main.cc PROPERTIES COMPILE_DEFINITIONS MOTIS_VERSION="${motis-git-tag}")
 target_link_libraries(motis
     motislib
