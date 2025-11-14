@@ -37,6 +37,7 @@
 #include "motis/ctx_exec.h"
 #include "motis/data.h"
 #include "motis/motis_instance.h"
+#include "motis/server.h"
 
 namespace fs = std::filesystem;
 
