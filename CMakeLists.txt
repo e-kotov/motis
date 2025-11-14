@@ -4,6 +4,8 @@ project(motis VERSION 0.0.0 LANGUAGES C CXX ASM)
 
 set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
 
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 option(BUILD_EXECUTABLE "Build motis executable target" ON)
 option(MOTIS_MIMALLOC "use mimalloc" OFF)
 
