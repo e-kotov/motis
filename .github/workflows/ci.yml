@@ -1,187 +1,52 @@
-name: CI
+name: motislib CI
 
 on:
   push:
     branches: [ master ]
   pull_request:
     branches: [ master ]
-  release:
-    types:
-      - published
-      - prereleased
-  workflow_dispatch:  # Enables manual triggering from any branch
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
-  openapi-validate:
+  linux-motislib:
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - name: Install Dependencies
-        run: npm install @openapitools/openapi-generator-cli -g
-
-      - name: OpenAPI Lint
-        run: openapi-generator-cli validate -i openapi.yaml
-
-  ui:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      - name: Install Dependencies
-        working-directory: ui
-        run: pnpm install
-
-      - name: Build
-        working-directory: ui
-        run: pnpm -r build
-
-      - name: Code Lint
-        working-directory: ui
-        run: pnpm run lint
-
-      - name: Svelte Check
-        working-directory: ui
-        run: pnpm run check
-
-  formatting:
-    runs-on: ubuntu-latest
-    container: ghcr.io/motis-project/docker-cpp-build
+    container:
+      image: ghcr.io/motis-project/docker-cpp-build
     steps:
       - uses: actions/checkout@v4
 
-      - name: Format files
-        run: |
-          find include src test \
-            -type f -a \( -name "*.cc" -o -name "*.h" -o -name ".cuh" -o -name ".cu" \) \
-            -print0 | xargs -0 clang-format-18 -i
+      - name: Configure CMake (Linux)
+        run: cmake -G Ninja -S . -B build -DBUILD_EXECUTABLE=OFF
 
-      - name: Check for differences
-        run: |
-          git config --global --add safe.directory `pwd`
-          git status --porcelain
-          git status --porcelain | xargs -I {} -0 test -z \"{}\"
+      - name: Build motislib (Linux)
+        run: cmake --build build --target motislib
 
-  macos:
+  macos-motislib:
     runs-on: macos-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - preset: macos-arm64
-            tests: On
-    env:
-      BUILDCACHE_COMPRESS: true
-      BUILDCACHE_DIRECT_MODE: true
-      BUILDCACHE_ACCURACY: SLOPPY
-      BUILDCACHE_LUA_PATH: ${{ github.workspace }}/tools
-      BUILDCACHE_DIR: ${{ github.workspace }}/.buildcache
-      UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1
-      ASAN_OPTIONS: alloc_dealloc_mismatch=0
     steps:
       - uses: actions/checkout@v4
 
-      - uses: maxim-lobanov/setup-xcode@v1
-        with:
-          xcode-version: 16.2
+      - uses: seanmiddleditch/gha-setup-ninja@v3
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
+      - name: Configure CMake (macOS)
+        run: cmake -G Ninja -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_EXECUTABLE=OFF
 
-      - name: Install ninja
-        run: brew install ninja
+      - name: Build motislib (macOS)
+        run: cmake --build build --config Release --target motislib
 
-      - name: Install NNG
-        run: brew install nng
+  windows-motislib:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
 
-      # ==== RESTORE CACHE ====
-      - name: Restore buildcache Cache
-        uses: actions/cache/restore@v4
-        id: restore-buildcache
-        with:
-          path: ${{ github.workspace }}/.buildcache
-          key: buildcache-${{ matrix.config.preset }}-${{ hashFiles('.pkg') }}-${{ hashFiles('**/*.h') }}-${{ hashFiles('**/*.cc') }}
-          restore-keys: |
-            buildcache-${{ matrix.config.preset }}-${{ hashFiles('.pkg') }}-${{ hashFiles('**/*.h') }}-
-            buildcache-${{ matrix.config.preset }}-${{ hashFiles('.pkg') }}-
-            buildcache-${{ matrix.config.preset }}-
+      - uses: seanmiddleditch/gha-setup-ninja@v3
 
-      - name: Dependencies Cache
-        uses: actions/cache/restore@v4
-        id: restore-deps
-        with:
-          path: ${{ github.workspace }}/deps
-          key: deps-${{ hashFiles('.pkg') }}
-          restore-keys: deps-
+      - uses: ilammy/msvc-dev-cmd@v1
 
-      # ==== BUILD ====
-      - name: CMake
-        run: cmake -G Ninja -S . -B build --preset=${{ matrix.config.preset }}
+      - name: Configure CMake (Windows)
+        run: >-
+          cmake -G Ninja -S . -B build
+          -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_EXECUTABLE=OFF
 
-      - name: Build
-        run: |
-          ./build/buildcache/bin/buildcache -z
-          cmake --build build --target motis motis-test motis-web-ui
-          ./build/buildcache/bin/buildcache -s
-
-      # ==== TESTS ====
-      - name: Run Tests
-        if: matrix.config.tests == 'On'
-        run: build/motis-test
-
-      # ==== SAVE CACHE ====
-      - name: Save buildcache cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/.buildcache
-          key: ${{ steps.restore-buildcache.outputs.cache-primary-key }}
-
-      - name: Save deps cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/deps
-          key: ${{ steps.restore-deps.outputs.cache-primary-key }}
-
-      # ==== DISTRIBUTION ====
-      - name: Create Distribution
-        run: |
-          mkdir motis
-          mv build/motis motis/motis
-          mv ui/build motis/ui
-          cp -r deps/tiles/profile motis/tiles-profiles
-          tar -C ./motis -cjf motis-${{ matrix.config.preset }}.tar.bz2 ./motis ./tiles-profiles ./ui
-
-      - name: Upload Distribution
-        uses: actions/upload-artifact@v4
-        with:
-          name: motis-${{ matrix.config.preset }}-${{ github.ref_name }}
-          path: motis-${{ matrix.config.preset }}.tar.bz2
-
-      # ==== RELEASE ====
-      - name: Upload Release
-        if: github.event.action == 'published' || github.event.action == 'prereleased'
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./motis-${{ matrix.config.preset }}.tar.bz2
-          asset_name: motis-${{ matrix.config.preset }}.tar.bz2
-          asset_content_type: application/x-tar
+      - name: Build motislib (Windows)
+        run: cmake --build build --config Release --target motislib
