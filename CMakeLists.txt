@@ -127,26 +127,27 @@ target_compile_features(motislib PUBLIC cxx_std_23)
 target_compile_options(motislib PRIVATE ${motis-compile-options})
 target_compile_definitions(motislib PUBLIC MOTIS_ENABLE_IPC=${MOTIS_ENABLE_IPC_INT})
 target_link_libraries(motislib
-    nigiri
-    osr
-    adr
-    ctx
-    boost-json
-    motis-api
-    reflectcpp
-    web-server
-    tiles
-    pbf_sdf_fonts_res
-    ssl
-    crypto
-    tg
-    lz4_static
-    web-server
-    prometheus-cpp::core
-    opentelemetry_trace
-    opentelemetry_exporter_otlp_http
-    Boost::stacktrace
-    "$<${_MOTIS_STACKTRACE_ON}:Boost::stacktrace_from_exception>"
+    PUBLIC
+        nigiri
+        osr
+        adr
+        ctx
+        boost-json
+        motis-api
+        reflectcpp
+        web-server
+        tiles
+        pbf_sdf_fonts_res
+        ssl
+        crypto
+        tg
+        lz4_static
+        web-server
+        prometheus-cpp::core
+        opentelemetry_trace
+        opentelemetry_exporter_otlp_http
+        Boost::stacktrace
+        "$<${_MOTIS_STACKTRACE_ON}:Boost::stacktrace_from_exception>"
 )
 if (MOTIS_ENABLE_IPC)
     target_link_libraries(motislib PUBLIC nng::nng)
