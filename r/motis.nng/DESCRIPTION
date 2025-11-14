@@ -1,0 +1,18 @@
+Package: motis.nng
+Type: Package
+Title: R Client for Local MOTIS via NNG IPC
+Version: 0.0.0.9000
+Description: Provides a high-performance R client for a local MOTIS instance
+    using the 'nanonext' bindings to the NNG (Nanomsg Next Gen) lightweight
+    messaging library. Communicates over NNG's request/reply protocol using
+    an IPC (Unix domain socket / named pipe) transport.
+Depends:
+    R (>= 4.3.0)
+Imports:
+    nanonext,
+    jsonlite
+License: MIT + file LICENSE
+Encoding: UTF-8
+LazyData: true
+Roxygen: list(markdown = TRUE)
+RoxygenNote: 7.3.2
