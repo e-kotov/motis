@@ -8,6 +8,8 @@ on:
   release:
     types:
       - published
+      - prereleased
+  workflow_dispatch:  # Enables manual triggering from any branch
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -56,12 +58,6 @@ jobs:
         working-directory: ui
         run: pnpm run check
 
-      - name: Upload UI Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: motis-ui
-          path: ui/build
-
   formatting:
     runs-on: ubuntu-latest
     container: ghcr.io/motis-project/docker-cpp-build
@@ -78,148 +74,15 @@ jobs:
         run: |
           git config --global --add safe.directory `pwd`
           git status --porcelain
-          git status --porcelain | xargs -I {} -0 test -z "{}"
+          git status --porcelain | xargs -I {} -0 test -z \"{}\"
 
-  windows-library:
-    runs-on: windows-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - mode: Debug
-          - mode: Release
-    env:
-      BUILDCACHE_COMPRESS: true
-      BUILDCACHE_DIRECT_MODE: true
-      BUILDCACHE_ACCURACY: SLOPPY
-      BUILDCACHE_DIR: ${{ github.workspace }}/.buildcache
-      BUILDCACHE_LUA_PATH: ${{ github.workspace }}/tools
-      BUILDCACHE_MAX_CACHE_SIZE: 1073741824
-      CLICOLOR_FORCE: 1
-    steps:
-      - uses: actions/checkout@v4
-      
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-          
-      - uses: ilammy/msvc-dev-cmd@v1
-
-      # ==== RESTORE CACHE ====
-      - name: Restore buildcache Cache
-        uses: actions/cache/restore@v4
-        id: restore-buildcache
-        with:
-          path: ${{ github.workspace }}/.buildcache
-          key: buildcache-windows-${{ matrix.config.mode }}-${{ hashFiles('.pkg') }}-${{ hashFiles('**/*.h') }}-${{ hashFiles('**/*.cc') }}
-          restore-keys: |
-            buildcache-windows-${{ matrix.config.mode }}-${{ hashFiles('.pkg') }}-${{ hashFiles('**/*.h') }}-
-            buildcache-windows-${{ matrix.config.mode }}-${{ hashFiles('.pkg') }}-
-            buildcache-windows-${{ matrix.config.mode }}-
-
-      - name: Restore Dependencies Cache
-        uses: actions/cache/restore@v4
-        id: restore-deps
-        with:
-          path: ${{ github.workspace }}/deps
-          key: deps-windows-${{ hashFiles('.pkg') }}
-          restore-keys: deps-windows-
-
-      # ==== BUILD ====
-      - name: Build Library
-        run: |
-          cmake `
-            -GNinja -S . -B build `
-            -DCMAKE_BUILD_TYPE=${{ matrix.config.mode }} `
-            -DMOTIS_MIMALLOC=ON `
-            -DBUILD_EXECUTABLE=ON
-          .\build\buildcache\bin\buildcache.exe -z
-          cmake --build build --target motislib motis-test motis-web-ui
-          $CompilerExitCode = $LastExitCode
-          Copy-Item ${env:VCToolsRedistDir}x64\Microsoft.VC143.CRT\*.dll .\build\
-          .\build\buildcache\bin\buildcache.exe -s
-          exit $CompilerExitCode
-
-      # ==== TESTS ====
-      - name: Run Tests
-        run: .\build\motis-test.exe
-
-      # ==== SAVE CACHE ====
-      - name: Save buildcache cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/.buildcache
-          key: ${{ steps.restore-buildcache.outputs.cache-primary-key }}
-
-      - name: Save deps cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/deps
-          key: ${{ steps.restore-deps.outputs.cache-primary-key }}
-
-      # ==== DISTRIBUTION ====
-      - name: Download UI Artifact
-        if: matrix.config.mode == 'Release'
-        uses: actions/download-artifact@v4
-        with:
-          name: motis-ui
-          path: dist/ui
-
-      - name: Create Distribution
-        if: matrix.config.mode == 'Release'
-        run: |
-          New-Item -ItemType Directory -Force -Path dist\lib
-          New-Item -ItemType Directory -Force -Path dist\include
-          
-          # Copy shared library and DLL dependencies
-          Copy-Item .\build\motis.dll dist\lib\
-          Copy-Item .\build\motis.lib dist\lib\
-          Copy-Item .\build\*.dll dist\lib\ -Exclude motis.dll
-          
-          # Copy headers
-          Copy-Item .\include\* dist\include\ -Recurse
-          
-          # Copy tiles profiles
-          Copy-Item .\deps\tiles\profile dist\tiles-profiles -Recurse
-          
-          # Create archive
-          cd dist
-          7z a motis-windows-library.zip *
-          mv motis-windows-library.zip ..
-
-      - name: Upload Distribution
-        if: matrix.config.mode == 'Release'
-        uses: actions/upload-artifact@v4
-        with:
-          name: motis-windows-library
-          path: motis-windows-library.zip
-
-      # ==== RELEASE ====
-      - name: Upload Release
-        if: github.event.action == 'published' && matrix.config.mode == 'Release'
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./motis-windows-library.zip
-          asset_name: motis-windows-library.zip
-          asset_content_type: application/zip
-
-  macos-library:
+  macos:
     runs-on: macos-latest
     strategy:
       fail-fast: false
       matrix:
         config:
           - preset: macos-arm64
-            arch: arm64
             tests: On
     env:
       BUILDCACHE_COMPRESS: true
@@ -243,6 +106,9 @@ jobs:
       - name: Install ninja
         run: brew install ninja
 
+      - name: Install NNG
+        run: brew install nng
+
       # ==== RESTORE CACHE ====
       - name: Restore buildcache Cache
         uses: actions/cache/restore@v4
@@ -265,12 +131,12 @@ jobs:
 
       # ==== BUILD ====
       - name: CMake
-        run: cmake -G Ninja -S . -B build --preset=${{ matrix.config.preset }} -DBUILD_EXECUTABLE=ON
+        run: cmake -G Ninja -S . -B build --preset=${{ matrix.config.preset }}
 
       - name: Build
         run: |
           ./build/buildcache/bin/buildcache -z
-          cmake --build build --target motislib motis-test motis-web-ui
+          cmake --build build --target motis motis-test motis-web-ui
           ./build/buildcache/bin/buildcache -s
 
       # ==== TESTS ====
@@ -294,275 +160,28 @@ jobs:
           key: ${{ steps.restore-deps.outputs.cache-primary-key }}
 
       # ==== DISTRIBUTION ====
-      - name: Download UI Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: motis-ui
-          path: ui-build
-
       - name: Create Distribution
         run: |
-          mkdir -p motis-${{ matrix.config.arch }}/lib
-          mkdir -p motis-${{ matrix.config.arch }}/include
-          
-          # Copy shared library
-          cp build/libmotis.dylib motis-${{ matrix.config.arch }}/lib/
-          
-          # Copy headers
-          cp -r include/* motis-${{ matrix.config.arch }}/include/
-          
-          # Copy UI
-          cp -r ui-build motis-${{ matrix.config.arch }}/ui
-          
-          # Copy tiles profiles
-          cp -r deps/tiles/profile motis-${{ matrix.config.arch }}/tiles-profiles
-          
-          # Create archive
-          tar -czf motis-macos-${{ matrix.config.arch }}-library.tar.gz motis-${{ matrix.config.arch }}
+          mkdir motis
+          mv build/motis motis/motis
+          mv ui/build motis/ui
+          cp -r deps/tiles/profile motis/tiles-profiles
+          tar -C ./motis -cjf motis-${{ matrix.config.preset }}.tar.bz2 ./motis ./tiles-profiles ./ui
 
       - name: Upload Distribution
         uses: actions/upload-artifact@v4
         with:
-          name: motis-macos-${{ matrix.config.arch }}-library
-          path: motis-macos-${{ matrix.config.arch }}-library.tar.gz
+          name: motis-${{ matrix.config.preset }}-${{ github.ref_name }}
+          path: motis-${{ matrix.config.preset }}.tar.bz2
 
       # ==== RELEASE ====
       - name: Upload Release
-        if: github.event.action == 'published'
+        if: github.event.action == 'published' || github.event.action == 'prereleased'
         uses: actions/upload-release-asset@v1.0.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./motis-macos-${{ matrix.config.arch }}-library.tar.gz
-          asset_name: motis-macos-${{ matrix.config.arch }}-library.tar.gz
+          asset_path: ./motis-${{ matrix.config.preset }}.tar.bz2
+          asset_name: motis-${{ matrix.config.preset }}.tar.bz2
           asset_content_type: application/x-tar
-
-  linux-library:
-    runs-on: ubuntu-latest
-    container:
-      image: ghcr.io/motis-project/docker-cpp-build
-    strategy:
-      fail-fast: false
-      matrix:
-        config:
-          - preset: linux-amd64-release
-            artifact: linux-amd64
-            tests: On
-            emulator: ""
-            full_dataset: false
-          - preset: clang-tidy
-            tests: Off
-            artifact: ""
-            emulator: ""
-            full_dataset: false
-          - preset: linux-sanitizer
-            tests: On
-            artifact: ""
-            emulator: ""
-            full_dataset: false
-          - preset: linux-debug
-            tests: On
-            artifact: ""
-            emulator: valgrind --suppressions=deps/osr/docs/tbb.supp --suppressions=deps/osr/docs/pthread.supp --suppressions=tools/suppress.txt --leak-check=full --gen-suppressions=all --error-exitcode=1
-            full_dataset: false
-    env:
-      BUILDCACHE_DIR: ${{ github.workspace }}/.buildcache
-      BUILDCACHE_DIRECT_MODE: true
-      BUILDCACHE_MAX_CACHE_SIZE: 26843545600
-      BUILDCACHE_LUA_PATH: ${{ github.workspace }}/tools
-      UBSAN_OPTIONS: halt_on_error=1:abort_on_error=1
-      ASAN_OPTIONS: alloc_dealloc_mismatch=0
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-
-      # ==== RESTORE CACHE ====
-      - name: Restore buildcache Cache
-        uses: actions/cache/restore@v4
-        id: restore-buildcache
-        with:
-          path: ${{ github.workspace }}/.buildcache
-          key: buildcache-${{ matrix.config.preset }}-${{ hashFiles('.pkg') }}-${{ hashFiles('**/*.h') }}-${{ hashFiles('**/*.cc') }}
-          restore-keys: |
-            buildcache-${{ matrix.config.preset }}-${{ hashFiles('.pkg') }}-${{ hashFiles('**/*.h') }}-
-            buildcache-${{ matrix.config.preset }}-${{ hashFiles('.pkg') }}-
-            buildcache-${{ matrix.config.preset }}-
-
-      - name: Dependencies Cache
-        uses: actions/cache/restore@v4
-        id: restore-deps
-        with:
-          path: ${{ github.workspace }}/deps
-          key: deps-linux-${{ hashFiles('.pkg') }}
-          restore-keys: deps-linux-
-
-      # ==== BUILD ====
-      - name: CMake
-        run: |
-          git config --global --add safe.directory `pwd`
-          cmake -G Ninja -S . -B build --preset=${{ matrix.config.preset }} -DBUILD_EXECUTABLE=ON
-
-      - name: Build
-        run: |
-          buildcache -z
-          cmake --build build --target motislib motis-test motis-web-ui
-          buildcache -s
-
-      # ==== TESTS ====
-      - name: Run Integration Tests
-        if: matrix.config.tests == 'On'
-        run: ${{ matrix.config.emulator }} build/motis-test
-
-      # ==== FULL DATASET TEST ====
-      - name: Test Full Dataset
-        if: matrix.config.full_dataset == true
-        run: |
-          ln -s deps/tiles/profile tiles-profiles
-          wget -N https://github.com/motis-project/test-data/raw/aachen/aachen.osm.pbf
-          wget -N https://github.com/motis-project/test-data/raw/aachen/AVV_GTFS_Masten_mit_SPNV.zip
-          ${{ matrix.config.emulator }} ./build/motis config aachen.osm.pbf AVV_GTFS_Masten_mit_SPNV.zip
-          ${{ matrix.config.emulator }} ./build/motis import
-          ${{ matrix.config.emulator }} ./build/motis generate -n 10
-          ${{ matrix.config.emulator }} ./build/motis batch
-          ${{ matrix.config.emulator }} ./build/motis compare -q queries.txt -r responses.txt responses.txt
-
-      # ==== SAVE CACHE ====
-      - name: Save buildcache cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/.buildcache
-          key: ${{ steps.restore-buildcache.outputs.cache-primary-key }}
-
-      - name: Save deps cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ${{ github.workspace }}/deps
-          key: ${{ steps.restore-deps.outputs.cache-primary-key }}
-
-      # ==== DISTRIBUTION ====
-      - name: Download UI Artifact
-        if: matrix.config.artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: motis-ui
-          path: ui-build
-
-      - name: Create Distribution
-        if: matrix.config.artifact
-        run: |
-          mkdir -p motis-${{ matrix.config.artifact }}/lib
-          mkdir -p motis-${{ matrix.config.artifact }}/include
-          
-          # Copy shared library
-          cp build/libmotis.so motis-${{ matrix.config.artifact }}/lib/
-          
-          # Copy headers
-          cp -r include/* motis-${{ matrix.config.artifact }}/include/
-          
-          # Copy UI
-          cp -r ui-build motis-${{ matrix.config.artifact }}/ui
-          
-          # Copy tiles profiles
-          cp -r deps/tiles/profile motis-${{ matrix.config.artifact }}/tiles-profiles
-          
-          # Create archive
-          tar -czf motis-${{ matrix.config.artifact }}-library.tar.gz motis-${{ matrix.config.artifact }}
-
-      - name: Upload Distribution
-        if: matrix.config.artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: motis-${{ matrix.config.artifact }}-library
-          path: motis-${{ matrix.config.artifact }}-library.tar.gz
-
-      # ==== RELEASE ====
-      - name: Upload Release
-        if: github.event.action == 'published' && matrix.config.artifact
-        uses: actions/upload-release-asset@v1.0.2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        with:
-          upload_url: ${{ github.event.release.upload_url }}
-          asset_path: ./motis-${{ matrix.config.artifact }}-library.tar.gz
-          asset_name: motis-${{ matrix.config.artifact }}-library.tar.gz
-          asset_content_type: application/x-tar
-
-  docker:
-    if: ${{ github.event.pull_request.head.repo.full_name == github.event.pull_request.base.repo.full_name }}
-    runs-on: ubuntu-latest
-    needs: linux-library
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-
-      - name: Docker setup-buildx
-        uses: docker/setup-buildx-action@v3
-        with:
-          install: true
-
-      - name: Docker Login to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.repository_owner }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Docker meta
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: |
-            ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=semver,pattern={{major}}
-            type=edge
-
-      - name: Docker build and push
-        uses: docker/build-push-action@v5
-        with:
-          push: true
-          context: .
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          platforms: linux/amd64
-
-  publish-motis-client:
-    if: github.event.action == 'published'
-    runs-on: ubuntu-latest
-    needs: linux
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 10
-      # for OIDC-based publishing to npm
-      - name: setup npm v11
-        run: npm install -g npm@11
-      # this will override version 2.0.0 from package.json to the current git tag version
-      - run: npm version from-git --no-git-tag-version
-        working-directory: ui/api
-      - run: npm ci
-        working-directory: ui/api
-      - run: pnpm run build
-        working-directory: ui/api
-      - run: npm publish --provenance --access public   
-        working-directory: ui/api
