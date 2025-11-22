@@ -7,7 +7,10 @@
 #include "osr/routing/route.h"
 
 #include "motis-api/motis-api.h"
+#include "motis/adr_extend_tt.h"
+#include "motis/data.h"
 #include "motis/fwd.h"
+#include "motis/match_platforms.h"
 #include "motis/osr/mode_to_profile.h"
 #include "motis/osr/parameters.h"
 #include "motis/parse_location.h"
@@ -55,6 +58,13 @@ struct one_to_many {
   osr::ways const& w_;
   osr::lookup const& l_;
   osr::elevation_storage const* elevations_;
+  cista::wrapped<nigiri::timetable> tt_;
+  cista::wrapped<tag_lookup> tags_;
+  ptr<osr::platforms> pl_;
+  platform_matches_t const* matches_;
+  adr_ext const* ae_;
+  tz_map_t const* tz_;
+  config const& config_;
 };
 
 }  // namespace motis::ep

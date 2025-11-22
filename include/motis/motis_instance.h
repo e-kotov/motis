@@ -113,7 +113,9 @@ struct motis_instance {
     GET<ep::rental>("/api/v1/rentals", d);
     GET<ep::one_to_all>("/api/experimental/one-to-all", d);
     GET<ep::one_to_all>("/api/v1/one-to-all", d);
-    GET<ep::one_to_many>("/api/v1/one-to-many", d);
+    GET<ep::one_to_many>("/api/v1/one-to-many", d.w_, d.l_, d.elevations_.get(),
+                         d.tt_, d.tags_, d.pl_, d.matches_, d.ae_, d.tz_,
+                         d.config_);
     POST<ep::one_to_many_post>("/api/v1/one-to-many", d);
 
     if (!c.requires_rt_timetable_updates()) {
