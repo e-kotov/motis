@@ -126,7 +126,7 @@ jobs:
         id: restore-deps
         with:
           path: ${{ github.workspace }}/deps
-          key: deps-${{ hashFiles('.pkg') }}
+          key: deps-${{ hashFiles('.pkg') || 'no-pkg' }}
           restore-keys: deps-
 
       # ==== BUILD ====
