@@ -77,7 +77,7 @@ jobs:
           git status --porcelain | xargs -I {} -0 test -z \"{}\"
 
   macos:
-    runs-on: macos-latest
+    runs-on: macos-13
     strategy:
       fail-fast: false
       matrix:
