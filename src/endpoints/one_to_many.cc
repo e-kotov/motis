@@ -100,9 +100,7 @@ api::oneToMany_response one_to_many_transit(
 
     for (auto const& o : offsets) {
       auto const time_at_stop =
-          query.arriveBy_
-              ? state.template get_best<0>()[to_idx(o.target_)][0].arr_
-              : state.template get_best<0>()[to_idx(o.target_)][0].dep_;
+          state.template get_best<0>()[to_idx(o.target_)][0];
       if (time_at_stop == (query.arriveBy_
                                ? n::kInvalidDelta<n::direction::kBackward>
                                : n::kInvalidDelta<n::direction::kForward>)) {
