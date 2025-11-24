@@ -95,8 +95,7 @@ api::oneToMany_response one_to_many_transit(
         query.elevationCosts_, one_max_time, query.maxMatchingDistance_,
         gbfs_rd, prepare_stats);
 
-    auto min_duration =
-        n::duration_t{std::numeric_limits<n::duration_t::rep>::max()};
+    auto min_duration = std::chrono::seconds::max();
 
     for (auto const& o : offsets) {
       auto const time_at_stop =
@@ -106,17 +105,14 @@ api::oneToMany_response one_to_many_transit(
                                : n::kInvalidDelta<n::direction::kForward>)) {
         continue;
       }
-      auto const duration =
-          query.arriveBy_ ? (time - time_at_stop) : (time_at_stop - time);
-      min_duration = std::min(min_duration, duration + o.duration());
+      auto const duration = std::chrono::minutes{time_at_stop};
+      min_duration = std::min(min_duration,
+                              std::chrono::duration_cast<std::chrono::seconds>(
+                                  duration + o.duration()));
     }
 
-    return min_duration !=
-                   n::duration_t{std::numeric_limits<n::duration_t::rep>::max()}
-               ? api::Duration{.duration_ =
-                                   std::chrono::duration_cast<
-                                       std::chrono::seconds>(min_duration)
-                                       .count()}
+    return min_duration != std::chrono::seconds::max()
+               ? api::Duration{.duration_ = min_duration.count()}
                : api::Duration{};
   });
 }
