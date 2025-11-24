@@ -69,7 +69,7 @@ api::oneToMany_response one_to_many_transit(
       .max_transfers_ = n::routing::kMaxTransfers,
       .max_travel_time_ = max_travel_time,
       .prf_idx_ = 0U,
-      .allowed_claszes_ = ~n::routing::clasz_mask_t{0U},
+      .allowed_claszes_ = n::routing::all_clasz_allowed(),
       .require_bike_transport_ = false,
       .require_car_transport_ = false,
       .transfer_time_settings_ = {},
@@ -100,8 +100,9 @@ api::oneToMany_response one_to_many_transit(
 
     for (auto const& o : offsets) {
       auto const time_at_stop =
-          query.arriveBy_ ? state.template get_best<0>()[o.target_][0].arr_
-                          : state.template get_best<0>()[o.target_][0].dep_;
+          query.arriveBy_
+              ? state.template get_best<0>()[to_idx(o.target_)][0].arr_
+              : state.template get_best<0>()[to_idx(o.target_)][0].dep_;
       if (time_at_stop == (query.arriveBy_
                                ? n::kInvalidDelta<n::direction::kBackward>
                                : n::kInvalidDelta<n::direction::kForward>)) {
