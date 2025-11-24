@@ -30,12 +30,12 @@ api::oneToMany_response one_to_many_transit(
     osr::platforms const* pl,
     osr::elevation_storage const* elevations,
     platform_matches_t const* matches,
-    adr_ext const* ae,
-    tz_map_t const* tz,
+    adr_ext const*,
+    tz_map_t const*,
     config const& config) {
   auto const time = std::chrono::time_point_cast<std::chrono::minutes>(
-      *query.time_.value_or(openapi::now()));
-  auto const max_travel_time = n::duration_t{query.max_};
+      openapi::now());
+  auto const max_travel_time = n::duration_t{static_cast<int>(query.max_ / 60)};
 
   auto const one = get_place(&tt, &tags, query.one_);
   auto const one_modes = std::vector<api::ModeEnum>{api::ModeEnum::WALK};
@@ -59,16 +59,16 @@ api::oneToMany_response one_to_many_transit(
       .start_ = r.get_offsets(
           nullptr, one, one_dir, one_modes, std::nullopt, std::nullopt,
           std::nullopt, std::nullopt, false, get_osr_parameters(query),
-          query.pedestrianProfile_, query.elevationCosts_, one_max_time,
+          api::PedestrianProfileEnum::FOOT, query.elevationCosts_, one_max_time,
           query.maxMatchingDistance_, gbfs_rd, prepare_stats),
       .td_start_ = r.get_td_offsets(
           nullptr, nullptr, one, one_dir, one_modes, get_osr_parameters(query),
-          query.pedestrianProfile_, query.elevationCosts_,
+          api::PedestrianProfileEnum::FOOT, query.elevationCosts_,
           query.maxMatchingDistance_, one_max_time, time, prepare_stats),
       .max_transfers_ = n::routing::kMaxTransfers,
       .max_travel_time_ = max_travel_time,
       .prf_idx_ = 0U,
-      .allowed_claszes_ = n::routing::all_clasz_mask(),
+      .allowed_claszes_ = ~n::clasz_mask_t{0U},
       .require_bike_transport_ = false,
       .require_car_transport_ = false,
       .transfer_time_settings_ = {},
@@ -76,8 +76,8 @@ api::oneToMany_response one_to_many_transit(
 
   auto const state =
       query.arriveBy_
-          ? n::routing::one_to_all<n::direction::kBackward>(tt, nullptr, q)
-          : n::routing::one_to_all<n::direction::kForward>(tt, nullptr, q);
+          ? n::routing::one_to_all<n::direction::kBackward>(*tt, nullptr, q)
+          : n::routing::one_to_all<n::direction::kForward>(*tt, nullptr, q);
 
   auto const many = utl::to_vec(query.many_, [](auto&& x) {
     auto const y = parse_location(x, ';');
@@ -90,7 +90,7 @@ api::oneToMany_response one_to_many_transit(
         nullptr, loc,
         query.arriveBy_ ? osr::direction::kForward : osr::direction::kBackward,
         one_modes, std::nullopt, std::nullopt, std::nullopt, std::nullopt,
-        false, get_osr_parameters(query), query.pedestrianProfile_,
+        false, get_osr_parameters(query), api::PedestrianProfileEnum::FOOT,
         query.elevationCosts_, one_max_time, query.maxMatchingDistance_,
         gbfs_rd, prepare_stats);
 
@@ -99,9 +99,10 @@ api::oneToMany_response one_to_many_transit(
 
     for (auto const& o : offsets) {
       auto const time_at_stop = query.arriveBy_
-                                    ? state.get_best<0>()[o.target_][0].arr_
-                                    : state.get_best<0>()[o.target_][0].dep_;
-      if (time_at_stop == n::kInvalidTime) {
+                                    ? state.template get_best<0>()[o.target_][0].arr_
+                                    : state.template get_best<0>()[o.target_][0].dep_;
+      if (time_at_stop == (query.arriveBy_ ? n::kInvalidDelta<n::direction::kBackward>
+                                          : n::kInvalidDelta<n::direction::kForward>)) {
         continue;
       }
       auto const duration =
@@ -123,7 +124,7 @@ api::oneToMany_response one_to_many::operator()(
     boost::urls::url_view const& url) const {
   auto const query = api::oneToMany_params{url.params()};
   if (query.mode_ == api::ModeEnum::TRANSIT) {
-    return one_to_many_transit(query, tt_, tags_, w_, l_, pl_, elevations_,
+    return one_to_many_transit(query, *tt_, *tags_, w_, l_, pl_, elevations_,
                                matches_, ae_, tz_, config_);
   }
   return one_to_many_handle_request(query, w_, l_, elevations_);
