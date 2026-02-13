@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <locale>
 
 #include "conf/configuration.h"
 
@@ -18,109 +19,68 @@ namespace po = boost::program_options;
 namespace json = boost::json;
 
 struct thousands_sep : std::numpunct<char> {
-  char_type do_thousands_sep() const override { return ','; }
-  string_type do_grouping() const override { return "\3"; }
+  char do_thousands_sep() const override { return ','; }
+  std::string do_grouping() const override { return "\3"; }
 };
 
 struct stats {
-  struct entry {
-    bool operator<(entry const& o) const { return value_ < o.value_; }
-    std::uint64_t msg_id_, value_;
-  };
+  static constexpr auto kMaxMs = 600'000ULL;  // 10 minutes
 
   stats() = default;
-  stats(std::string name, std::uint64_t count_so_far)
-      : name_{std::move(name)}, values_{count_so_far} {}
+  stats(std::string name, std::uint64_t)
+      : name_{std::move(name)}, histogram_(kMaxMs + 1, 0U) {}
 
-  void add(uint64_t msg_id, std::uint64_t value) {
-    values_.emplace_back(entry{msg_id, value});
+  void add(uint64_t, std::uint64_t value) {
+    auto const bucket = value < kMaxMs ? value : kMaxMs;
+    ++histogram_[bucket];
     sum_ += value;
-  }
-
-  std::string name_;
-  std::vector<entry> values_;
-  std::uint64_t sum_{};
-};
-
-struct category {
-  category() = default;
-  explicit category(std::string name) : name_(std::move(name)) {}
-
-  std::string name_;
-  std::map<std::string, stats> stats_;
-};
-
-stats::entry quantile(std::vector<stats::entry> const& sorted_values,
-                      double q) {
-  if (q == 1.0) {
-    return sorted_values.back();
-  } else {
-    return sorted_values[std::min(
-        static_cast<std::size_t>(std::round(q * (sorted_values.size() - 1))),
-        sorted_values.size() - 1)];
-  }
-}
-
-void print_category(category& cat,
-                    std::uint64_t count,
-                    bool const compact,
-                    int const top) {
-  std::cout << "\n"
-            << cat.name_ << "\n"
-            << std::string(cat.name_.size(), '=') << "\n"
-            << std::endl;
-  for (auto& s : cat.stats_) {
-    auto& stat = s.second;
-    if (stat.values_.empty()) {
-      continue;
+    ++count_;
+    if (value < min_) {
+      min_ = value;
     }
-    utl::sort(stat.values_);
-    auto const avg = (stat.sum_ / static_cast<double>(count));
-    if (compact) {
-      std::cout << std::left << std::setw(30) << stat.name_
-                << " avg: " << std::setw(27) << std::setprecision(4)
-                << std::fixed << avg << " Q(99): " << std::setw(25)
-                << quantile(stat.values_, 0.99).value_
-                << " Q(90): " << std::setw(22)
-                << quantile(stat.values_, 0.9).value_
-                << " Q(80): " << std::setw(22)
-                << quantile(stat.values_, 0.8).value_
-                << " Q(50): " << std::setw(22)
-                << quantile(stat.values_, 0.5).value_;
+    if (value > max_) {
+      max_ = value;
+    }
+  }
 
-      auto const from = static_cast<std::uint64_t>(
-          std::max(static_cast<std::int64_t>(0L),
-                   static_cast<std::int64_t>(stat.values_.size()) -
-                       static_cast<std::int64_t>(top)));
-      for (auto i = from; i != stat.values_.size(); ++i) {
-        auto const i_rev = stat.values_.size() - (i - from) - 1;
-        std::cout << "(v=" << stat.values_[i_rev].value_
-                  << ", i=" << stat.values_[i_rev].msg_id_ << ")";
-        if (i != stat.values_.size() - 1) {
-          std::cout << ", ";
-        }
+  std::uint64_t quantile(double q) const {
+    auto const target = static_cast<std::uint64_t>(
+        std::round(q * static_cast<double>(count_ - 1)));
+    std::uint64_t cumulative = 0;
+    auto const search_limit = std::min(max_, kMaxMs);
+    for (auto i = 0ULL; i <= search_limit; ++i) {
+      cumulative += histogram_[i];
+      if (cumulative > target) {
+        return i;
       }
-      std::cout << std::endl;
-    } else {
-      std::cout
-          << stat.name_ << "\n      average: " << std::right << std::setw(15)
-          << std::setprecision(2) << std::fixed << avg
-          << "\n          max: " << std::right << std::setw(12)
-          << std::max_element(begin(stat.values_), end(stat.values_))->value_
-          << "\n  99 quantile: " << std::right << std::setw(12)
-          << quantile(stat.values_, 0.99).value_
-          << "\n  90 quantile: " << std::right << std::setw(12)
-          << quantile(stat.values_, 0.9).value_
-          << "\n  80 quantile: " << std::right << std::setw(12)
-          << quantile(stat.values_, 0.8).value_
-          << "\n  50 quantile: " << std::right << std::setw(12)
-          << quantile(stat.values_, 0.5).value_
-          << "\n          min: " << std::right << std::setw(12)
-          << std::min_element(begin(stat.values_), end(stat.values_))->value_
-          << "\n"
-          << std::endl;
     }
+    return kMaxMs;
   }
+
+  std::string name_;
+  std::vector<std::uint64_t> histogram_;
+  std::uint64_t sum_{}, count_{};
+  std::uint64_t min_{std::numeric_limits<std::uint64_t>::max()};
+  std::uint64_t max_{};
+};
+
+void print_stats(stats const& s) {
+  if (s.count_ == 0) {
+    return;
+  }
+  auto const avg = s.sum_ / static_cast<double>(s.count_);
+  std::cout << s.name_ << "\n      average: " << std::right << std::setw(15)
+            << std::setprecision(2) << std::fixed << avg
+            << "\n          max: " << std::right << std::setw(12) << s.max_
+            << "\n  99 quantile: " << std::right << std::setw(12)
+            << s.quantile(0.99) << "\n  90 quantile: " << std::right
+            << std::setw(12) << s.quantile(0.9)
+            << "\n  80 quantile: " << std::right << std::setw(12)
+            << s.quantile(0.8) << "\n  50 quantile: " << std::right
+            << std::setw(12) << s.quantile(0.5)
+            << "\n          min: " << std::right << std::setw(12) << s.min_
+            << "\n"
+            << std::endl;
 }
 
 namespace motis {
@@ -217,11 +177,9 @@ int batch(int ac, char** av) {
     }
   }
 
-  auto cat = category{};
-  cat.name_ = "response_time";
-  cat.stats_.emplace("response_time", std::move(response_time));
+  std::cout << "\nresponse_time\n=============\n" << std::endl;
   std::cout.imbue(std::locale(std::locale::classic(), new thousands_sep));
-  print_category(cat, queries.size(), false, 10U);
+  print_stats(response_time);
 
   return 0U;
 }
