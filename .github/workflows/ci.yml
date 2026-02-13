@@ -1,13 +1,7 @@
 name: CI
 
 on:
-  push:
-    branches: [ master ]
-  pull_request:
-    branches: [ master ]
-  release:
-    types:
-      - published
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -75,7 +69,7 @@ jobs:
           git status --porcelain | xargs -I {} -0 test -z \"{}\"
 
   msvc:
-    runs-on: [ self-hosted, windows, x64 ]
+    runs-on: windows-latest
     strategy:
       fail-fast: false
       matrix:
@@ -267,7 +261,7 @@ jobs:
           asset_content_type: application/x-tar
 
   linux:
-    runs-on: [ self-hosted, linux, x64, '${{ matrix.config.preset }}' ]
+    runs-on: ubuntu-latest
     container:
       image: ghcr.io/motis-project/docker-cpp-build
       volumes:
