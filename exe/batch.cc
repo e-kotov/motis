@@ -1,3 +1,4 @@
+#include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <locale>
@@ -47,7 +48,7 @@ struct stats {
     auto const target = static_cast<std::uint64_t>(
         std::round(q * static_cast<double>(count_ - 1)));
     std::uint64_t cumulative = 0;
-    auto const search_limit = std::min(max_, kMaxMs);
+    auto const search_limit = std::min<std::uint64_t>(max_, kMaxMs);
     for (auto i = 0ULL; i <= search_limit; ++i) {
       cumulative += histogram_[i];
       if (cumulative > target) {
