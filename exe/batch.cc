@@ -1,5 +1,6 @@
 #include <fstream>
 #include <iostream>
+#include <locale>
 
 #include "conf/configuration.h"
 
@@ -16,6 +17,11 @@
 namespace fs = std::filesystem;
 namespace po = boost::program_options;
 namespace json = boost::json;
+
+struct thousands_sep : std::numpunct<char> {
+  char do_thousands_sep() const override { return ','; }
+  std::string do_grouping() const override { return "\3"; }
+};
 
 struct stats {
   static constexpr auto kMaxMs = 600'000ULL;  // 10 minutes
