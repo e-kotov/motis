@@ -25,6 +25,8 @@
 #include "motis/gbfs/update.h"
 #include "motis/import.h"
 
+#include "net/bad_request_exception.h"
+
 #include "./util.h"
 
 namespace json = boost::json;
@@ -617,6 +619,35 @@ TEST(motis, routing) {
 ])",
           to_str(res.direct_));
     }
+  }
+
+
+  // Phase 0: TAD Rejection Contract Tests
+  // Ensure unsupported features explicitly throw bad_request_exception
+  {
+    auto const base_query = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T01:25Z&algorithm=TAD";
+
+    // 1. arriveBy
+    EXPECT_THROW(routing(base_query + std::string("&arriveBy=true")), net::bad_request_exception);
+
+    // 2. Coordinate / time-dependent offsets
+    EXPECT_THROW(routing("?fromPlace=49.87526849014631,8.62771903392948&toPlace=test_FFM&time=2019-05-01T01:25Z&algorithm=TAD"), net::bad_request_exception);
+
+    // 3. Via routing
+    EXPECT_THROW(routing(base_query + std::string("&via=test_LANGEN")), net::bad_request_exception);
+
+    // 4. Vehicle transport (e.g. bike/car)
+    EXPECT_THROW(routing(base_query + std::string("&preTransitModes=CAR")), net::bad_request_exception);
+
+    // 5. Filtered classes
+    // (This requires passing a parameter that changes allowed_claszes_, like transitModes)
+    EXPECT_THROW(routing(base_query + std::string("&transitModes=HIGHSPEED_RAIL")), net::bad_request_exception);
+
+    // 6. Non-default pedestrian profile
+    EXPECT_THROW(routing(base_query + std::string("&pedestrianProfile=WHEELCHAIR")), net::bad_request_exception);
+
+    // 7. Custom transfer time settings
+    EXPECT_THROW(routing(base_query + std::string("&transferPenalty=60")), net::bad_request_exception);
   }
 
   // Route with wheelchair.
