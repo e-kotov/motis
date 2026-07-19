@@ -305,6 +305,27 @@ TEST(motis, routing) {
     ioc.run();
   }
 
+  auto const routing = utl::init_from<ep::routing>(d).value();
+  EXPECT_EQ(d.rt_->rtt_.get(), routing.rt_->rtt_.get());
+
+  // Route with TAD algorithm and verify exactly 1 journey is returned.
+  {
+    auto const res_tad = routing(
+        "?fromPlace=test_DA"
+        "&toPlace=test_FFM"
+        "&time=2019-05-01T01:25Z"
+        "&algorithm=TAD");
+
+    EXPECT_GT(res_tad.itineraries_.size(), 0U);
+    EXPECT_EQ(
+        R"(date=2019-05-01, start=01:25, end=01:48, duration=00:23, transfers=0, legs=[
+    (from=test_DA [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:25, mode="WALK", trip="-", end=2019-05-01 01:27),
+    (from=test_DA_10 [track=10, scheduled_track=10, level=-1], to=test_FFM_10 [track=10, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:45),
+    (from=test_FFM_10 [track=10, scheduled_track=10, level=0], to=test_FFM [track=-, scheduled_track=-, level=-3], start=2019-05-01 01:45, mode="WALK", trip="-", end=2019-05-01 01:48)
+])",
+        to_str(res_tad.itineraries_));
+  }
+
   auto const stats =
       n::rt::gtfsrt_update_msg(*d.tt_, *d.rt_->rtt_, n::source_idx_t{0}, "test",
                                test::to_feed_msg(
@@ -345,8 +366,14 @@ TEST(motis, routing) {
   EXPECT_EQ(1U, stats.total_entities_success_);
   EXPECT_EQ(2U, stats.alert_total_resolve_success_);
 
-  auto const routing = utl::init_from<ep::routing>(d).value();
-  EXPECT_EQ(d.rt_->rtt_.get(), routing.rt_->rtt_.get());
+  // Route with TAD algorithm after RT data is applied (should throw bad_request)
+  {
+    EXPECT_ANY_THROW(routing(
+        "?fromPlace=test_DA"
+        "&toPlace=test_FFM"
+        "&time=2019-05-01T01:25Z"
+        "&algorithm=TAD"));
+  }
 
   // Route direct with GBFS.
   {
@@ -632,4 +659,5 @@ TEST(motis, routing) {
 ])",
         to_str(res.itineraries_));
   }
+
 }

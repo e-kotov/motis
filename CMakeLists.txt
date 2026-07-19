@@ -107,7 +107,8 @@ else ()
             -Wall
             -Wextra
             -Wno-mismatched-new-delete
-            -Wno-maybe-uninitialized)
+            -Wno-maybe-uninitialized
+            -Wno-deprecated-declarations)
     if (NOT CMAKE_CROSSCOMPILING)
         set(motis-compile-options ${motis-compile-options} -Werror)
     endif ()
