@@ -38,6 +38,7 @@
 #include "nigiri/routing/raptor/pong.h"
 #include "nigiri/routing/tb/query_engine.h"
 #include "nigiri/routing/tb/tb_data.h"
+#include "nigiri/routing/tad/tad_route.h"
 #include "nigiri/routing/tb/tb_search.h"
 
 #include "motis/config.h"
@@ -939,6 +940,30 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
             query.arriveBy_ ? n::direction::kBackward : n::direction::kForward,
             query.timeout_.has_value() ? std::chrono::seconds{*query.timeout_}
                                        : max_timeout);
+      } else if (algorithm == api::algorithmEnum::TAD) {
+        if (tbd_ == nullptr ||
+            (rtt != nullptr && rtt->n_rt_transports() != 0U) ||
+            query.arriveBy_ || q.prf_idx_ != tbd_->prf_idx_ ||
+            q.allowed_claszes_ != n::routing::all_clasz_allowed() ||
+            !q.td_start_.empty() || !q.td_dest_.empty() ||
+            !q.transfer_time_settings_.default_ || !q.via_stops_.empty() ||
+            q.require_bike_transport_ || q.require_car_transport_) {
+          // Fallback to RAPTOR for unsupported query shapes
+          std::cout << "TAD Fallback to RAPTOR: unsupported query features\n";
+          auto raptor_state = n::routing::raptor_state{};
+          r = n::routing::raptor_search(
+              *tt_, rtt, search_state, raptor_state, q,
+              query.arriveBy_ ? n::direction::kBackward : n::direction::kForward,
+              query.timeout_.has_value() ? std::chrono::seconds{*query.timeout_}
+                                         : max_timeout);
+        } else {
+          auto tad_state = n::routing::tad_state{};
+          r = n::routing::tad_route(
+              *tt_, rtt, search_state, tad_state, q,
+              query.arriveBy_ ? n::direction::kBackward : n::direction::kForward,
+              query.timeout_.has_value() ? std::chrono::seconds{*query.timeout_}
+                                         : max_timeout);
+        }
       } else {
         auto tb_state = n::routing::tb::query_state{*tt_, *tbd_};
         r = n::routing::tb::tb_search(*tt_, search_state, tb_state, q);
