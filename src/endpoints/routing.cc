@@ -930,14 +930,13 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
       } else if (algorithm == api::algorithmEnum::TAD) {
         utl::verify<net::bad_request_exception>(
             !query.arriveBy_ &&
-            q.td_start_.empty() && q.td_dest_.empty() &&
             q.via_stops_.empty() &&
             !q.require_bike_transport_ && !q.require_car_transport_ &&
             q.allowed_claszes_ == n::routing::all_clasz_allowed() &&
             (rtt == nullptr || rtt->n_rt_transports() == 0U) &&
             q.prf_idx_ == 0U &&
             q.transfer_time_settings_.default_,
-            "TAD algorithm does not support the requested query features (e.g. arriveBy, time-dependent offsets, real-time data, via routing, vehicle transport, filtered classes, non-default profiles, or custom transfer times).");
+            "TAD algorithm does not support the requested query features (e.g. arriveBy, real-time data, via routing, vehicle transport, filtered classes, non-default profiles, or custom transfer times).");
             
         auto tad_state = n::routing::tad_state{};
         r = n::routing::tad_route(
