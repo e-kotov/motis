@@ -1,7 +1,0 @@
---- src/endpoints/routing.cc
-+++ src/endpoints/routing.cc
-@@ -992,2 +992,4 @@
-             [&, cache = street_routing_cache_t{}](auto&& j) mutable {
-+              std::cout << "DEBUG: journey_to_response input: start_time_ = " << j.start_time_ 
-+                        << ", dest_time_ = " << j.dest_time_ << "\n";
-               return journey_to_response(
