@@ -622,32 +622,46 @@ TEST(motis, routing) {
   }
 
 
-  // Phase 0: TAD Rejection Contract Tests
-  // Ensure unsupported features explicitly throw bad_request_exception
+  // Phase 0: TAD Rejection Contract Tests & Phase 2/3 Parity Tests
+  // Executed BEFORE real-time data is injected into the environment.
   {
-    auto const base_query = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T01:25Z&algorithm=TAD";
+    auto const base_query = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T01:25Z&numItineraries=1";
 
     // 1. arriveBy
-    EXPECT_THROW(routing(base_query + std::string("&arriveBy=true")), net::bad_request_exception);
+    EXPECT_THROW(routing(base_query + std::string("&arriveBy=true&algorithm=TAD")), net::bad_request_exception);
 
-    // 2. Coordinate / time-dependent offsets
-    EXPECT_THROW(routing("?fromPlace=49.87526849014631,8.62771903392948&toPlace=test_FFM&time=2019-05-01T01:25Z&algorithm=TAD"), net::bad_request_exception);
-
+    // 2. Coordinate / time-dependent offsets are now SUPPORTED by TAD (Phase 2)
+    {
+      auto const raptor_res = routing("?fromPlace=49.87526849014631,8.62771903392948&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&numItineraries=1&algorithm=RAPTOR");
+      auto const tad_res = routing("?fromPlace=49.87526849014631,8.62771903392948&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&numItineraries=1&algorithm=TAD");
+      EXPECT_EQ(to_str(raptor_res.itineraries_), to_str(tad_res.itineraries_));
+    }
+    
     // 3. Via routing
-    EXPECT_THROW(routing(base_query + std::string("&via=test_LANGEN")), net::bad_request_exception);
+    EXPECT_THROW(routing(base_query + std::string("&via=test_LANGEN&algorithm=TAD")), net::bad_request_exception);
 
-    // 4. Vehicle transport (e.g. bike/car)
-    EXPECT_THROW(routing(base_query + std::string("&preTransitModes=CAR")), net::bad_request_exception);
-
-    // 5. Filtered classes
-    // (This requires passing a parameter that changes allowed_claszes_, like transitModes)
-    EXPECT_THROW(routing(base_query + std::string("&transitModes=HIGHSPEED_RAIL")), net::bad_request_exception);
-
-    // 6. Non-default pedestrian profile
-    EXPECT_THROW(routing(base_query + std::string("&pedestrianProfile=WHEELCHAIR")), net::bad_request_exception);
-
-    // 7. Custom transfer time settings
-    EXPECT_THROW(routing(base_query + std::string("&transferPenalty=60")), net::bad_request_exception);
+    // 4-7. Phase 3 Constraints are now SUPPORTED by TAD (Phase 3)
+    {
+      // 4. Vehicle transport (e.g. bike/car)
+      auto const r_car = routing(base_query + std::string("&preTransitModes=CAR&algorithm=RAPTOR"));
+      auto const t_car = routing(base_query + std::string("&preTransitModes=CAR&algorithm=TAD"));
+      EXPECT_EQ(to_str(r_car.itineraries_), to_str(t_car.itineraries_));
+      
+      // 5. Filtered classes
+      auto const r_class = routing(base_query + std::string("&transitModes=HIGHSPEED_RAIL&algorithm=RAPTOR"));
+      auto const t_class = routing(base_query + std::string("&transitModes=HIGHSPEED_RAIL&algorithm=TAD"));
+      EXPECT_EQ(to_str(r_class.itineraries_), to_str(t_class.itineraries_));
+      
+      // 6. Non-default pedestrian profile
+      auto const r_prof = routing(base_query + std::string("&pedestrianProfile=WHEELCHAIR&algorithm=RAPTOR"));
+      auto const t_prof = routing(base_query + std::string("&pedestrianProfile=WHEELCHAIR&algorithm=TAD"));
+      EXPECT_EQ(to_str(r_prof.itineraries_), to_str(t_prof.itineraries_));
+      
+      // 7. Custom transfer time settings
+      auto const r_trans = routing(base_query + std::string("&transferPenalty=60&algorithm=RAPTOR"));
+      auto const t_trans = routing(base_query + std::string("&transferPenalty=60&algorithm=TAD"));
+      EXPECT_EQ(to_str(r_trans.itineraries_), to_str(t_trans.itineraries_));
+    }
   }
 
   // Route with wheelchair.
