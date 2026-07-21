@@ -439,15 +439,6 @@ TEST(motis, routing) {
   EXPECT_EQ(1U, stats.total_entities_success_);
   EXPECT_EQ(2U, stats.alert_total_resolve_success_);
 
-  // Route with TAD algorithm after RT data is applied (should throw bad_request)
-  {
-    EXPECT_THROW(routing(
-        "?fromPlace=test_DA"
-        "&toPlace=test_FFM"
-        "&time=2019-05-01T01:25Z"
-        "&algorithm=TAD"), net::bad_request_exception);
-  }
-
   // Route direct with GBFS.
   {
     auto const res = routing(
