@@ -930,9 +930,8 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
       } else if (algorithm == api::algorithmEnum::TAD) {
         utl::verify<net::bad_request_exception>(
             !query.arriveBy_ &&
-            q.via_stops_.empty() &&
-            (rtt == nullptr || rtt->n_rt_transports() == 0U),
-            "TAD algorithm does not support the requested query features (e.g. arriveBy, real-time data, or via routing).");
+            q.via_stops_.empty(),
+            "TAD algorithm does not support the requested query features (e.g. arriveBy, or via routing).");
             
         auto tad_state = n::routing::tad_state{};
         r = n::routing::tad_route(
