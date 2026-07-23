@@ -272,7 +272,8 @@ std::string to_str(std::vector<api::Itinerary> const& x) {
 
 TEST(motis, routing) {
   auto ec = std::error_code{};
-  std::filesystem::remove_all("test/data", ec);
+  auto const data_dir = std::filesystem::current_path() / "tmp_motis_test_data";
+  std::filesystem::remove_all(data_dir, ec);
 
   auto const c = config{
       .server_ = {{.web_folder_ = "ui/build", .n_threads_ = 1U}},
@@ -291,7 +292,7 @@ TEST(motis, routing) {
       .osr_footpath_ = true,
       .geocoding_ = true,
       .reverse_geocoding_ = true};
-  auto d = import(c, "test/data", true);
+  auto d = import(c, data_dir, true);
   d.rt_->e_ = std::make_unique<elevators>(*d.w_, *d.elevator_nodes_,
                                           parse_fasta(kFastaJson));
   d.init_rtt(date::sys_days{2019_y / May / 1});
