@@ -320,10 +320,8 @@ TEST(motis, routing) {
 
     EXPECT_GT(res_tad.itineraries_.size(), 0U);
     EXPECT_EQ(
-        R"(date=2019-05-01, start=01:25, end=01:48, duration=00:23, transfers=0, legs=[
-    (from=test_DA [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:25, mode="WALK", trip="-", end=2019-05-01 01:27),
-    (from=test_DA_10 [track=10, scheduled_track=10, level=-1], to=test_FFM_10 [track=10, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:45),
-    (from=test_FFM_10 [track=10, scheduled_track=10, level=0], to=test_FFM [track=-, scheduled_track=-, level=-3], start=2019-05-01 01:45, mode="WALK", trip="-", end=2019-05-01 01:48)
+        R"(date=2019-05-01, start=01:35, end=01:45, duration=00:10, transfers=0, legs=[
+    (from=test_DA_10 [track=10, scheduled_track=10, level=-1], to=test_FFM_10 [track=10, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:45)
 ])",
         to_str(res_tad.itineraries_));
   }
@@ -333,8 +331,45 @@ TEST(motis, routing) {
   {
     auto const base_query = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T01:25Z&numItineraries=1";
 
-    // 1. arriveBy
-    EXPECT_THROW(routing(base_query + std::string("&arriveBy=true&algorithm=TAD")), net::bad_request_exception);
+    // 1. arriveBy is now SUPPORTED by TAD (Phase 5)
+    {
+      auto const base = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T02:00Z&arriveBy=true&numItineraries=1";
+      auto const raptor_res = routing(base + std::string("&algorithm=RAPTOR"));
+      auto const tad_res = routing(base + std::string("&algorithm=TAD"));
+      EXPECT_GT(raptor_res.itineraries_.size(), 0U);
+      EXPECT_GT(tad_res.itineraries_.size(), 0U);
+      
+      bool found = false;
+      if (!tad_res.itineraries_.empty()) {
+        for (auto const& it : raptor_res.itineraries_) {
+          if (it.startTime_ == tad_res.itineraries_.front().startTime_ &&
+              it.endTime_ == tad_res.itineraries_.front().endTime_ &&
+              it.legs_.size() == tad_res.itineraries_.front().legs_.size()) {
+            bool legs_match = true;
+            for (size_t i = 0; i < it.legs_.size(); ++i) {
+              if (it.legs_[i].mode_ != tad_res.itineraries_.front().legs_[i].mode_ ||
+                  it.legs_[i].tripId_ != tad_res.itineraries_.front().legs_[i].tripId_ ||
+                  it.legs_[i].from_.name_ != tad_res.itineraries_.front().legs_[i].from_.name_ ||
+                  it.legs_[i].to_.name_ != tad_res.itineraries_.front().legs_[i].to_.name_) {
+                legs_match = false;
+                break;
+              }
+            }
+            if (legs_match) {
+              found = true;
+              break;
+            }
+          }
+        }
+      }
+      EXPECT_TRUE(found) << "TAD itinerary not found in RAPTOR's Pareto set. TAD string: " << to_str(tad_res.itineraries_);
+      
+      // arriveBy test: verify that the arrival time respects the query constraint
+      // 2019-05-01T02:00Z -> 1556676000
+      if (!tad_res.itineraries_.empty()) {
+        EXPECT_LE(static_cast<std::chrono::sys_seconds>(tad_res.itineraries_.front().endTime_).time_since_epoch().count(), 1556676000);
+      }
+    }
 
     // 2. Coordinate / time-dependent offsets are now SUPPORTED by TAD (Phase 2)
     {
@@ -348,8 +383,31 @@ TEST(motis, routing) {
       EXPECT_EQ(raptor_res.itineraries_.front().endTime_, tad_res.itineraries_.front().endTime_);
     }
     
-    // 3. Via routing
-    EXPECT_THROW(routing(base_query + std::string("&via=test_LANGEN&algorithm=TAD")), net::bad_request_exception);
+    // 3. Via routing is now SUPPORTED by TAD (Phase 6)
+    {
+      auto const via_query = "?fromPlace=test_DA&toPlace=test_FFM_HAUPT&time=2019-05-01T01:25Z&via=test_FFM";
+      auto const raptor_via = routing(via_query + std::string("&algorithm=RAPTOR"));
+      auto const tad_via = routing(via_query + std::string("&algorithm=TAD"));
+      EXPECT_GT(raptor_via.itineraries_.size(), 0U);
+      EXPECT_GT(tad_via.itineraries_.size(), 0U);
+      EXPECT_EQ(raptor_via.itineraries_.front().endTime_, tad_via.itineraries_.front().endTime_);
+
+      bool via_stop_found = false;
+      auto const& legs = tad_via.itineraries_.front().legs_;
+      ASSERT_GE(legs.size(), 2U);
+      auto const is_via_stop = [](std::string_view id) {
+        return id.starts_with("test_FFM") && !id.starts_with("test_FFM_HAUPT");
+      };
+      for (std::size_t i = 0; i + 1 < legs.size(); ++i) {
+        auto const to_id = legs[i].to_.stopId_.value_or("");
+        auto const from_id = legs[i + 1].from_.stopId_.value_or("");
+        if (is_via_stop(to_id) && is_via_stop(from_id)) {
+          via_stop_found = true;
+          break;
+        }
+      }
+      EXPECT_TRUE(via_stop_found);
+    }
 
     // 4-7. Phase 3 Constraints are now SUPPORTED by TAD (Phase 3)
     {

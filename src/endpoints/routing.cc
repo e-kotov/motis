@@ -928,15 +928,10 @@ api::plan_response routing::operator()(boost::urls::url_view const& url) const {
           continue;
         }
       } else if (algorithm == api::algorithmEnum::TAD) {
-        utl::verify<net::bad_request_exception>(
-            !query.arriveBy_ &&
-            q.via_stops_.empty(),
-            "TAD algorithm does not support the requested query features (e.g. arriveBy, or via routing).");
-            
         auto tad_state = n::routing::tad_state{};
         r = n::routing::tad_route(
             *tt_, rtt, search_state, tad_state, q,
-            n::direction::kForward,
+            query.arriveBy_ ? n::direction::kBackward : n::direction::kForward,
             query.timeout_.has_value() ? std::chrono::seconds{*query.timeout_}
                                        : max_timeout);
       } else if (algorithm == api::algorithmEnum::RAPTOR || tbd_ == nullptr ||
