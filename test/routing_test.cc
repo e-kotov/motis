@@ -317,6 +317,7 @@ TEST(motis, routing) {
         "?fromPlace=test_DA"
         "&toPlace=test_FFM"
         "&time=2019-05-01T01:25Z"
+        "&timetableView=false"
         "&algorithm=TAD");
 
     EXPECT_GT(res_tad.itineraries_.size(), 0U);
