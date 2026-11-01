@@ -1,5 +1,6 @@
 #include "motis/odm/prima.h"
 
+#include <algorithm>
 #include <variant>
 
 #include "boost/asio/io_context.hpp"
@@ -18,7 +19,7 @@
 #include "motis/http_req.h"
 #include "motis/odm/bounds.h"
 #include "motis/odm/odm.h"
-#include "motis/transport_mode_ids.h"
+#include "motis/transport_mode.h"
 
 namespace n = nigiri;
 namespace nr = nigiri::routing;
@@ -49,6 +50,7 @@ prima::prima(std::string const& prima_url,
 
 n::duration_t init_direct(std::vector<direct_ride>& rides,
                           ep::routing const& r,
+                          n::rt_timetable const* rtt,
                           elevators const* e,
                           gbfs::gbfs_routing_data& gbfs,
                           api::Place const& from_p,
@@ -56,12 +58,15 @@ n::duration_t init_direct(std::vector<direct_ride>& rides,
                           n::interval<n::unixtime_t> const intvl,
                           api::plan_params const& query,
                           unsigned api_version) {
+  auto const max_matching_distance =
+      std::min(query.maxMatchingDistance_,
+               r.config_.get_limits().max_max_matching_distance_);
   auto [_, direct_duration] = r.route_direct(
-      e, gbfs, {}, from_p, to_p, {api::ModeEnum::CAR}, std::nullopt,
+      rtt, e, gbfs, {}, from_p, to_p, {api::ModeEnum::CAR}, std::nullopt,
       std::nullopt, std::nullopt, std::nullopt, false, intvl.from_, false,
       get_osr_parameters(query), query.pedestrianProfile_,
-      query.elevationCosts_, kODMMaxDuration, query.maxMatchingDistance_,
-      kODMDirectFactor, api_version);
+      query.elevationCosts_, kODMMaxDuration, max_matching_distance,
+      kODMDirectFactor, query.detailedLegs_, api_version);
 
   auto const step =
       std::chrono::duration_cast<n::unixtime_t::duration>(kODMDirectPeriod);
@@ -111,11 +116,13 @@ void init_pt(std::vector<n::routing::offset>& offsets,
              n::routing::location_match_mode location_match_mode,
              std::chrono::seconds const max) {
   auto stats = std::map<std::string, std::uint64_t>{};
-  offsets = r.get_offsets(rtt, l, dir, {api::ModeEnum::CAR}, std::nullopt,
-                          std::nullopt, std::nullopt, std::nullopt, false,
+  auto const max_matching_distance =
+      std::min(query.maxMatchingDistance_,
+               r.config_.get_limits().max_max_matching_distance_);
+  offsets = r.get_offsets(rtt, l, dir, {api::ModeEnum::CAR}, rental_options{},
                           get_osr_parameters(query), query.pedestrianProfile_,
-                          query.elevationCosts_, max,
-                          query.maxMatchingDistance_, gbfs_rd, stats);
+                          query.elevationCosts_, max, max_matching_distance,
+                          gbfs_rd, stats);
 
   std::erase_if(offsets, [&](n::routing::offset const& o) {
     return r.ride_sharing_bounds_ != nullptr &&
@@ -160,8 +167,8 @@ void prima::init(n::interval<n::unixtime_t> const& search_intvl,
       (r.ride_sharing_bounds_ == nullptr ||
        (r.ride_sharing_bounds_->contains(from_.pos_) &&
         r.ride_sharing_bounds_->contains(to_.pos_)))) {
-    direct_duration_ = init_direct(direct_ride_sharing_, r, e, gbfs, from, to,
-                                   search_intvl, query, api_version);
+    direct_duration_ = init_direct(direct_ride_sharing_, r, rtt, e, gbfs, from,
+                                   to, search_intvl, query, api_version);
 
     if (use_direct_taxi && r.odm_bounds_ != nullptr &&
         r.odm_bounds_->contains(from_.pos_) &&
@@ -320,18 +327,16 @@ std::size_t n_rides_in_response(json::array const& ja) {
 void fix_first_mile_duration(std::vector<nr::journey>& journeys,
                              std::vector<nr::start> const& first_mile,
                              std::vector<nr::start> const& prev_first_mile,
-                             n::transport_mode_id_t const mode) {
+                             transport_mode_t const mode) {
   for (auto const [curr, prev] : utl::zip(first_mile, prev_first_mile)) {
 
-    auto const uses_prev = [&,
-                            prev2 = prev /* hack for MacOS - fixed with 16 */](
-                               n::routing::journey const& j) {
+    auto const uses_prev = [&](n::routing::journey const& j) {
       return j.legs_.size() > 1 &&
-             j.legs_.front().dep_time_ == prev2.time_at_start_ &&
-             j.legs_.front().arr_time_ >= prev2.time_at_stop_ &&
-             (j.legs_.front().arr_time_ == prev2.time_at_stop_ ||
-              mode == kRideSharingTransportModeId) &&
-             j.legs_.front().to_ == prev2.stop_ &&
+             j.legs_.front().dep_time_ == prev.time_at_start_ &&
+             j.legs_.front().arr_time_ >= prev.time_at_stop_ &&
+             (j.legs_.front().arr_time_ == prev.time_at_stop_ ||
+              mode == kRideSharingTransportMode) &&
+             j.legs_.front().to_ == prev.stop_ &&
              is_odm_leg(j.legs_.front(), mode);
     };
 
@@ -346,10 +351,9 @@ void fix_first_mile_duration(std::vector<nr::journey>& journeys,
                        // time_at_stop (rideshare)
           }
           l->dep_time_ = curr.time_at_start_;
-          l->arr_time_ =
-              curr.time_at_stop_ - (mode == kRideSharingTransportModeId
-                                        ? kODMTransferBuffer
-                                        : n::duration_t{0});
+          l->arr_time_ = curr.time_at_stop_ - (mode == kRideSharingTransportMode
+                                                   ? kODMTransferBuffer
+                                                   : n::duration_t{0});
           std::get<n::routing::offset>(l->uses_).duration_ =
               l->arr_time_ - l->dep_time_;
           // fill gap (transfer/waiting) with footpath
@@ -366,14 +370,14 @@ void fix_first_mile_duration(std::vector<nr::journey>& journeys,
 void fix_last_mile_duration(std::vector<nr::journey>& journeys,
                             std::vector<nr::start> const& last_mile,
                             std::vector<nr::start> const& prev_last_mile,
-                            n::transport_mode_id_t const mode) {
+                            transport_mode_t const mode) {
   for (auto const [curr, prev] : utl::zip(last_mile, prev_last_mile)) {
     auto const uses_prev =
         [&, prev2 = prev /* hack for MacOS - fixed with 16 */](auto const& j) {
           return j.legs_.size() > 1 &&
                  j.legs_.back().dep_time_ <= prev2.time_at_stop_ &&
                  (j.legs_.back().dep_time_ == prev2.time_at_stop_ ||
-                  mode == kRideSharingTransportModeId) &&
+                  mode == kRideSharingTransportMode) &&
                  j.legs_.back().arr_time_ == prev2.time_at_start_ &&
                  j.legs_.back().from_ == prev2.stop_ &&
                  is_odm_leg(j.legs_.back(), mode);
@@ -389,10 +393,9 @@ void fix_last_mile_duration(std::vector<nr::journey>& journeys,
             continue;  // odm leg fixed already before with a different
                        // time_at_stop (rideshare)
           }
-          l->dep_time_ =
-              curr.time_at_stop_ + (mode == kRideSharingTransportModeId
-                                        ? kODMTransferBuffer
-                                        : n::duration_t{0});
+          l->dep_time_ = curr.time_at_stop_ + (mode == kRideSharingTransportMode
+                                                   ? kODMTransferBuffer
+                                                   : n::duration_t{0});
           l->arr_time_ = curr.time_at_start_;
           std::get<n::routing::offset>(l->uses_).duration_ =
               l->arr_time_ - l->dep_time_;
@@ -412,7 +415,7 @@ void add_direct_odm(std::vector<direct_ride> const& direct,
                     place_t const& from,
                     place_t const& to,
                     bool arrive_by,
-                    n::transport_mode_id_t const mode) {
+                    transport_mode_t const mode) {
   auto from_l = std::visit(
       utl::overloaded{[](osr::location const&) {
                         return get_special_station(n::special_station::kStart);

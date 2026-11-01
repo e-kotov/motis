@@ -1,6 +1,9 @@
 #pragma once
 
+#include <condition_variable>
 #include <memory>
+#include <mutex>
+#include <vector>
 
 #include "cista/memory_holder.h"
 
@@ -11,9 +14,10 @@
 
 #include "osr/types.h"
 
+#include "motis-api/motis-api.h"
 #include "motis/adr_extend_tt.h"
-#include "motis/compute_footpaths.h"
 #include "motis/config.h"
+#include "motis/elevators/parse_elevator_id_osm_mapping.h"
 #include "motis/fwd.h"
 #include "motis/gbfs/data.h"
 #include "motis/match_platforms.h"
@@ -29,6 +33,29 @@ struct point_rtree;
 
 template <typename T>
 using ptr = std::unique_ptr<T>;
+
+#if defined(NIGIRI_CUDA)
+struct gpu_search_pool {
+  struct lease {
+    lease(gpu_search_pool&, nigiri::routing::gpu::gpu_raptor_state&);
+    ~lease();
+    lease(lease const&) = delete;
+    lease& operator=(lease const&) = delete;
+    gpu_search_pool& pool_;
+    nigiri::routing::gpu::gpu_raptor_state& state_;
+  };
+
+  gpu_search_pool(nigiri::routing::gpu::gpu_timetable const&, unsigned n);
+  ~gpu_search_pool();
+
+  lease acquire();
+
+  std::mutex mutex_;
+  std::condition_variable cv_;
+  std::vector<std::unique_ptr<nigiri::routing::gpu::gpu_raptor_state>> states_;
+  std::vector<nigiri::routing::gpu::gpu_raptor_state*> free_;
+};
+#endif
 
 struct rt {
   rt();
@@ -65,21 +92,29 @@ struct data {
   void load_tiles();
   void load_auser_updater(std::string_view, config::timetable::dataset const&);
 
+  void init_initial(std::string_view motis_version);
   void init_rtt(date::sys_days = std::chrono::time_point_cast<date::days>(
                     std::chrono::system_clock::now()));
 
   auto cista_members() {
     // !!! Remember to add all new members !!!
-    return std::tie(config_, t_, adr_ext_, f_, tz_, r_, tc_, w_, pl_, l_,
-                    elevations_, tt_, tbd_, tags_, location_rtree_,
-                    elevator_nodes_, shapes_, railviz_static_, matches_,
-                    way_matches_, rt_, gbfs_, odm_bounds_, ride_sharing_bounds_,
-                    flex_areas_, metrics_, auser_);
+    return std::tie(config_, initial_response_, t_, adr_ext_, f_, tz_, r_, tc_,
+                    w_, pl_, l_, elevations_, tt_, tbd_, tags_, location_rtree_,
+                    elevator_nodes_, elevator_osm_mapping_, shapes_,
+                    railviz_static_, matches_, way_matches_, rt_, gbfs_,
+                    odm_bounds_, ride_sharing_bounds_, flex_areas_, metrics_,
+                    auser_
+#if defined(NIGIRI_CUDA)
+                    ,
+                    gpu_tt_, gpu_pool_
+#endif
+    );
   }
 
   std::filesystem::path path_;
   config config_;
 
+  api::initial_response initial_response_;
   cista::wrapped<adr::typeahead> t_;
   cista::wrapped<adr_ext> adr_ext_;
   ptr<adr::formatter> f_;
@@ -95,6 +130,7 @@ struct data {
   cista::wrapped<tag_lookup> tags_;
   ptr<point_rtree<nigiri::location_idx_t>> location_rtree_;
   ptr<hash_set<osr::node_idx_t>> elevator_nodes_;
+  ptr<elevator_id_osm_mapping_t> elevator_osm_mapping_;
   ptr<nigiri::shapes_storage> shapes_;
   ptr<railviz_static_index> railviz_static_;
   cista::wrapped<vector_map<nigiri::location_idx_t, osr::platform_idx_t>>
@@ -108,6 +144,10 @@ struct data {
   ptr<flex::flex_areas> flex_areas_;
   ptr<metrics_registry> metrics_;
   ptr<std::map<std::string, auser>> auser_;
+#if defined(NIGIRI_CUDA)
+  ptr<nigiri::routing::gpu::gpu_timetable> gpu_tt_;
+  ptr<gpu_search_pool> gpu_pool_;
+#endif
 };
 
 }  // namespace motis

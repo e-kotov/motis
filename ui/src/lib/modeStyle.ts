@@ -34,9 +34,15 @@ export const getModeStyle = (l: LegLike): [string, string, string] => {
 					return ['other', '#075985', 'white'];
 			}
 
+		case 'RIDE_SHARING':
+			return ['car', '#217edb', 'white'];
+
 		case 'CAR':
 		case 'CAR_PARKING':
 			return ['car', '#4c4947', 'white'];
+
+		case 'HGV':
+			return ['truck', '#2563eb', 'white'];
 
 		case 'FLEX':
 		case 'ODM':
@@ -49,13 +55,13 @@ export const getModeStyle = (l: LegLike): [string, string, string] => {
 			return ['bus', '#9ccc65', 'black'];
 
 		case 'TRAM':
-			return ['tram', '#ebe717', 'white'];
+			return ['tram', '#edce00', 'white'];
 
 		case 'SUBURBAN':
-			return ['sbahn', '#4caf50', 'white'];
+			return ['train', '#4caf50', 'white'];
 
 		case 'SUBWAY':
-			return ['ubahn', '#3f51b5', 'white'];
+			return ['metro', '#3f51b5', 'white'];
 
 		case 'FERRY':
 			return ['ship', '#00acc1', 'white'];

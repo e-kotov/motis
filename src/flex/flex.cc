@@ -1,8 +1,12 @@
 #include "motis/flex/flex.h"
 
+#include <memory>
+#include <optional>
 #include <ranges>
 
 #include "utl/concat.h"
+#include "utl/enumerate.h"
+#include "utl/to_vec.h"
 
 #include "osr/lookup.h"
 #include "osr/routing/parameters.h"
@@ -17,6 +21,7 @@
 #include "motis/flex/flex_routing_data.h"
 #include "motis/match_platforms.h"
 #include "motis/osr/max_distance.h"
+#include "motis/osr/one_to_many_searches.h"
 
 namespace n = nigiri;
 
@@ -28,7 +33,7 @@ osr::sharing_data prepare_sharing_data(n::timetable const& tt,
                                        osr::platforms const* pl,
                                        flex_areas const& fa,
                                        platform_matches_t const* pl_matches,
-                                       mode_id const id,
+                                       mode_payload const id,
                                        osr::direction const dir,
                                        flex_routing_data& frd) {
   auto const stop_seq =
@@ -53,9 +58,7 @@ osr::sharing_data prepare_sharing_data(n::timetable const& tt,
       n_nodes += tt.location_group_locations_[to_lg].size();
     }});
   }
-  frd.additional_node_offset_ = w.n_nodes();
-  frd.additional_node_coordinates_.clear();
-  frd.additional_edges_.clear();
+  frd.additional_nodes_.reset(w.n_nodes());
   frd.start_allowed_.resize(n_nodes);
   frd.end_allowed_.resize(n_nodes);
   frd.through_allowed_.resize(n_nodes);
@@ -67,19 +70,23 @@ osr::sharing_data prepare_sharing_data(n::timetable const& tt,
   // and adds additional edges to/from this node.
   auto next_add_node_idx = osr::node_idx_t{w.n_nodes()};
   auto const add_tt_location = [&](n::location_idx_t const l) {
-    frd.additional_nodes_.emplace_back(l);
-    frd.additional_node_coordinates_.emplace_back(
+    frd.additional_nodes_.locations_.emplace_back(l);
+    frd.additional_nodes_.coordinates_.emplace_back(
         tt.locations_.coordinates_[l]);
 
     auto const pos = get_location(&tt, &w, pl, pl_matches, tt_location{l});
     auto const l_additional_node_idx = next_add_node_idx++;
 
-    auto const matches = lookup.match<osr::foot<false>>(
+    auto matches = osr::match_result{};
+    matches.start(pos.lvl_);
+    lookup.get_way_candidates<osr::foot<false>>(
         osr::foot<false>::parameters{}, pos, false, osr::direction::kForward,
-        kMaxGbfsMatchingDistance, nullptr);
+        kMaxGbfsMatchingDistance, nullptr, matches);
+    matches.finish();
 
-    for (auto const& m : matches) {
-      auto const handle_node = [&](osr::node_candidate const& node) {
+    auto const m = matches[osr::match_idx_t{0U}];
+    for (auto j = std::size_t{0U}; j != m.size(); ++j) {
+      auto const handle_node = [&](osr::candidate_node const& node) {
         if (!node.valid() || node.dist_to_node_ > kMaxGbfsMatchingDistance) {
           return;
         }
@@ -87,12 +94,13 @@ osr::sharing_data prepare_sharing_data(n::timetable const& tt,
         auto const edge_to_an = osr::additional_edge{
             l_additional_node_idx,
             static_cast<osr::distance_t>(node.dist_to_node_)};
-        auto& node_edges = frd.additional_edges_[node.node_];
+        auto& node_edges = frd.additional_nodes_.edges_[node.node_];
         if (utl::find(node_edges, edge_to_an) == end(node_edges)) {
           node_edges.emplace_back(edge_to_an);
         }
 
-        auto& add_node_out = frd.additional_edges_[l_additional_node_idx];
+        auto& add_node_out =
+            frd.additional_nodes_.edges_[l_additional_node_idx];
         auto const edge_from_an = osr::additional_edge{
             node.node_, static_cast<osr::distance_t>(node.dist_to_node_)};
         if (utl::find(add_node_out, edge_from_an) == end(add_node_out)) {
@@ -100,8 +108,8 @@ osr::sharing_data prepare_sharing_data(n::timetable const& tt,
         }
       };
 
-      handle_node(m.left_);
-      handle_node(m.right_);
+      handle_node(m.left(j));
+      handle_node(m.right(j));
     }
 
     return l_additional_node_idx;
@@ -159,7 +167,8 @@ flex_routings_t get_flex_routings(
     n::routing::start_time_t const start_time,
     geo::latlng const& pos,
     osr::direction const dir,
-    std::chrono::seconds const max) {
+    std::chrono::seconds const max,
+    osr_parameters const& osr_params) {
   auto routings = flex_routings_t{};
 
   // Traffic days helpers.
@@ -204,8 +213,8 @@ flex_routings_t get_flex_routings(
       }
     }
   };
-  auto const box =
-      geo::box{pos, get_max_distance(osr::search_profile::kFoot, max)};
+  auto const box = geo::box{
+      pos, get_max_distance(osr::search_profile::kFoot, osr_params, max)};
   tt.flex_area_rtree_.search(box.min_.lnglat_float(), box.max_.lnglat_float(),
                              [&](auto&&, auto&&, n::flex_area_idx_t const a) {
                                add_area_flex_transports(a);
@@ -214,13 +223,14 @@ flex_routings_t get_flex_routings(
 
   // Collect location group transports.
   auto location_groups = hash_set<n::location_group_idx_t>{};
-  loc_rtree.in_radius(pos, get_max_distance(osr::search_profile::kFoot, max),
-                      [&](n::location_idx_t const l) {
-                        for (auto const lg : tt.location_location_groups_[l]) {
-                          location_groups.emplace(lg);
-                        }
-                        return true;
-                      });
+  loc_rtree.in_radius(
+      pos, get_max_distance(osr::search_profile::kFoot, osr_params, max),
+      [&](n::location_idx_t const l) {
+        for (auto const lg : tt.location_location_groups_[l]) {
+          location_groups.emplace(lg);
+        }
+        return true;
+      });
   for (auto const& lg : location_groups) {
     for (auto const t : tt.location_group_transports_[lg]) {
       if (!is_active(t)) {
@@ -241,7 +251,7 @@ flex_routings_t get_flex_routings(
 bool is_in_flex_stop(n::timetable const& tt,
                      osr::ways const& w,
                      flex_areas const& fa,
-                     flex_routing_data const& frd,
+                     flex_additional_nodes const& additional_nodes,
                      n::flex_stop_t const& s,
                      osr::node_idx_t const n) {
   return s.apply(utl::overloaded{
@@ -254,7 +264,7 @@ bool is_in_flex_stop(n::timetable const& tt,
           return false;
         }
         auto const locations = tt.location_group_locations_.at(lg);
-        auto const l = frd.get_additional_node(n);
+        auto const l = additional_nodes.get(n);
         return utl::find(locations, l) != end(locations);
       }});
 }
@@ -275,10 +285,12 @@ void add_flex_td_offsets(osr::ways const& w,
                          osr_parameters const& osr_params,
                          flex_routing_data& frd,
                          n::routing::td_offsets_t& ret,
-                         std::map<std::string, std::uint64_t>& stats) {
+                         std::map<std::string, std::uint64_t>& stats,
+                         one_to_many_side* const states) {
   UTL_START_TIMING(flex_lookup_timer);
 
-  auto const max_dist = get_max_distance(osr::search_profile::kCarSharing, max);
+  auto const max_dist =
+      get_max_distance(osr::search_profile::kCarSharing, osr_params, max);
   auto const near_stops = loc_rtree.in_radius(pos.pos_, max_dist);
   auto const near_stop_locations =
       utl::to_vec(near_stops, [&](n::location_idx_t const l) {
@@ -287,15 +299,15 @@ void add_flex_td_offsets(osr::ways const& w,
 
   auto const params =
       to_profile_parameters(osr::search_profile::kCarSharing, osr_params);
-  auto const pos_match =
-      lookup.match(params, pos, false, dir, max_matching_distance, nullptr,
-                   osr::search_profile::kCarSharing);
+  auto pos_match = osr::match_result{};
+  lookup.match(params, pos, false, dir, max_matching_distance, nullptr,
+               osr::search_profile::kCarSharing, {}, pos_match);
   auto const near_stop_matches = get_reverse_platform_way_matches(
       lookup, way_matches, osr::search_profile::kCarSharing, near_stops,
       near_stop_locations, dir, max_matching_distance);
 
-  auto const routings =
-      get_flex_routings(tt, loc_rtree, start_time, pos.pos_, dir, max);
+  auto const routings = get_flex_routings(tt, loc_rtree, start_time, pos.pos_,
+                                          dir, max, osr_params);
 
   stats.emplace(fmt::format("prepare_{}_FLEX_lookup", to_str(dir)),
                 UTL_GET_TIMING_MS(flex_lookup_timer));
@@ -306,11 +318,35 @@ void add_flex_td_offsets(osr::ways const& w,
     auto const sharing_data = prepare_sharing_data(
         tt, w, lookup, pl, fa, matches, transports.front(), dir, frd);
 
-    auto const paths =
-        osr::route(params, w, lookup, osr::search_profile::kCarSharing, pos,
-                   near_stop_locations, pos_match, near_stop_matches,
-                   static_cast<osr::cost_t>(max.count()), dir, nullptr,
-                   &sharing_data, nullptr);
+    auto state = osr::route_one_to_many(
+        params, w, lookup, osr::search_profile::kCarSharing, pos,
+        near_stop_locations, pos_match[osr::match_idx_t{0U}], near_stop_matches,
+        max, dir, nullptr, &sharing_data, nullptr);
+    auto const& paths = state->results();
+
+    // Store osr routing state for later path reconstruction.
+    if (states != nullptr) {
+      auto dest_idx = hash_map<n::location_idx_t, std::size_t>{};
+      for (auto const [i, l] : utl::enumerate(near_stops)) {
+        if (paths[i].has_value()) {
+          dest_idx.emplace(l, i);
+        }
+      }
+
+      if (!dest_idx.empty()) {
+        auto const search_idx = states->searches_.size();
+        states->searches_.emplace_back(
+            one_to_many_search{std::move(state), std::move(dest_idx),
+                               std::move(frd.additional_nodes_)});
+
+        for (auto const id : transports) {
+          states
+              ->by_mode_[transport_mode(api::ModeEnum::FLEX, id.to_payload())] =
+              search_idx;
+        }
+      }
+    }
+
     auto const day_idx_iv = get_relevant_days(tt, start_time);
     for (auto const id : transports) {
       auto const t = id.get_flex_transport();
@@ -336,7 +372,7 @@ void add_flex_td_offsets(osr::ways const& w,
                 dir == osr::direction::kForward
                     ? from_stop_idx + rel_to_stop_idx
                     : from_stop_idx - rel_to_stop_idx);
-            auto const duration = n::duration_t{p->cost_ / 60};
+            auto const duration = n::duration_t{p->duration_.count() / 60};
             auto const to_stop_time_window =
                 tt.flex_transport_stop_time_windows_[t][to_stop_idx];
             auto const abs_to_stop_iv = n::interval{
@@ -350,14 +386,16 @@ void add_flex_td_offsets(osr::ways const& w,
                                              ? iv_at_to_stop << duration
                                              : iv_at_to_stop >> duration;
 
-            auto& offsets = ret[l];
-            if (offsets.empty()) {
-              offsets.emplace_back(n::unixtime_t{n::i32_minutes{0U}},
-                                   n::footpath::kMaxDuration, id.to_id());
+            if (iv_at_from_stop.from_ < iv_at_from_stop.to_ &&
+                duration < n::footpath::kMaxDuration) {
+              auto const mode =
+                  transport_mode(api::ModeEnum::FLEX, id.to_payload());
+              auto& offsets = ret[l];
+              offsets.push_back(n::routing::td_offset::make(
+                  iv_at_from_stop.from_, duration, mode));
+              offsets.push_back(n::routing::td_offset::make(
+                  iv_at_from_stop.to_, n::footpath::kMaxDuration, mode));
             }
-            offsets.emplace_back(iv_at_from_stop.from_, duration, id.to_id());
-            offsets.emplace_back(iv_at_from_stop.to_, n::footpath::kMaxDuration,
-                                 id.to_id());
           }
         }
       }
@@ -375,13 +413,6 @@ void add_flex_td_offsets(osr::ways const& w,
                                               tt.flex_area_name_[a]);
                                         }})),
         UTL_GET_TIMING_MS(routing_timer));
-  }
-
-  for (auto& [_, offsets] : ret) {
-    utl::sort(offsets, [](n::routing::td_offset const& a,
-                          n::routing::td_offset const& b) {
-      return a.valid_from_ < b.valid_from_;
-    });
   }
 }
 

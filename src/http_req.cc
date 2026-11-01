@@ -1,9 +1,11 @@
 #include "motis/http_req.h"
 
 #include "boost/asio/awaitable.hpp"
+#include "boost/asio/cancel_after.hpp"
 #include "boost/asio/co_spawn.hpp"
 #include "boost/asio/io_context.hpp"
 #include "boost/asio/ssl.hpp"
+#include "boost/asio/use_awaitable.hpp"
 #include "boost/beast/core.hpp"
 #include "boost/beast/http.hpp"
 #include "boost/beast/http/dynamic_body.hpp"
@@ -44,7 +46,8 @@ asio::awaitable<http_response> req_no_tls(
   auto const host = proxy ? proxy->host_ : url.host();
   auto const port =
       proxy ? proxy->port_ : std::string{url.has_port() ? url.port() : "80"};
-  auto const results = co_await resolver.async_resolve(host, port);
+  auto const results = co_await resolver.async_resolve(
+      host, port, asio::cancel_after(timeout, asio::use_awaitable));
 
   stream.expires_after(timeout);
 
@@ -58,32 +61,37 @@ asio::awaitable<http_response> req_tls(
     std::optional<std::string> const& body,
     std::chrono::seconds const timeout,
     std::optional<proxy> const& proxy) {
-  auto ssl_ctx = ssl::context{ssl::context::tlsv12_client};
+  auto ssl_ctx = ssl::context{ssl::context::tls_client};
   ssl_ctx.set_default_verify_paths();
   ssl_ctx.set_verify_mode(ssl::verify_none);
   ssl_ctx.set_options(ssl::context::default_workarounds |
-                      ssl::context::no_sslv2 | ssl::context::no_sslv3 |
                       ssl::context::single_dh_use);
 
   auto executor = co_await asio::this_coro::executor;
   auto resolver = asio::ip::tcp::resolver{executor};
   auto stream = ssl::stream<beast::tcp_stream>{executor, ssl_ctx};
 
-  auto const host = proxy ? proxy->host_ : url.host();
-  auto const port =
-      proxy ? proxy->port_ : std::string{url.has_port() ? url.port() : "443"};
+  auto const target_port = std::string{url.has_port() ? url.port() : "443"};
+  auto const target_host = url.host();
 
-  if (!SSL_set_tlsext_host_name(stream.native_handle(),
-                                const_cast<char*>(host.c_str()))) {
-    throw boost::system::system_error{
-        {static_cast<int>(::ERR_get_error()), asio::error::get_ssl_category()}};
-  }
-
-  auto const results = co_await resolver.async_resolve(host, port);
+  auto const results = co_await resolver.async_resolve(
+      proxy ? proxy->host_ : target_host, proxy ? proxy->port_ : target_port,
+      asio::cancel_after(timeout, asio::use_awaitable));
 
   stream.next_layer().expires_after(timeout);
 
   co_await beast::get_lowest_layer(stream).async_connect(results);
+
+  if (proxy && proxy->use_connect_) {
+    co_await http_CONNECT(stream, url, proxy);
+  }
+
+  if (!SSL_set_tlsext_host_name(stream.native_handle(),
+                                const_cast<char*>(target_host.c_str()))) {
+    throw boost::system::system_error{
+        {static_cast<int>(::ERR_get_error()), asio::error::get_ssl_category()}};
+  }
+
   co_await stream.async_handshake(ssl::stream_base::client);
   co_return co_await req(std::move(stream), url, headers, body);
 }
@@ -131,9 +139,7 @@ asio::awaitable<http::response<http::dynamic_body>> http_GET(
   auto n_redirects = 0U;
   auto next_url = url;
   while (n_redirects < 3U) {
-    auto const use_tls =
-        proxy.has_value() ? proxy->use_tls_
-                          : next_url.scheme_id() == boost::urls::scheme::https;
+    auto const use_tls = next_url.scheme_id() == boost::urls::scheme::https;
     auto const res = co_await (
         use_tls ? req_tls(next_url, headers, std::nullopt, timeout, proxy)
                 : req_no_tls(next_url, headers, std::nullopt, timeout, proxy));
@@ -159,9 +165,7 @@ asio::awaitable<http::response<http::dynamic_body>> http_POST(
   auto n_redirects = 0U;
   auto next_url = url;
   while (n_redirects < 3U) {
-    auto const use_tls =
-        proxy.has_value() ? proxy->use_tls_
-                          : next_url.scheme_id() == boost::urls::scheme::https;
+    auto const use_tls = next_url.scheme_id() == boost::urls::scheme::https;
     auto const res = co_await (
         use_tls ? req_tls(next_url, headers, body, timeout, proxy)
                 : req_no_tls(next_url, headers, body, timeout, proxy));

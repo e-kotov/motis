@@ -3,14 +3,13 @@
 #include "net/too_many_exception.h"
 
 #include "osr/geojson.h"
-#include "osr/routing/profiles/car_sharing.h"
 #include "osr/routing/route.h"
 
 namespace json = boost::json;
 
 namespace motis::ep {
 
-constexpr auto const kMaxWays = 2048U;
+constexpr auto const kMaxWays = 8192U;
 
 json::value graph::operator()(json::value const& query) const {
   auto const& q = query.as_object();
@@ -60,7 +59,7 @@ json::value graph::operator()(json::value const& query) const {
     }
   });
 
-  gj.finish(&osr::get_dijkstra<osr::car_sharing<osr::track_node_tracking>>());
+  gj.finish();
 
   return gj.json();
 }

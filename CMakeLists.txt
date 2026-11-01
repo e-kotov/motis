@@ -53,6 +53,7 @@ if (ICC_LINT)
     include(cmake/clang-tidy.cmake)
 endif ()
 
+set(CMAKE_COMPILE_WARNING_AS_ERROR ON)
 if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
     set(motis-compile-options
             -Weverything
@@ -90,13 +91,11 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "Clang")
             -Wno-implicit-int-float-conversion
             -Wno-nrvo
             -Wno-thread-safety-negative
-            -Wno-unused-private-field
-            -Werror)
+            -Wno-unused-private-field)
 elseif ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "AppleClang")
-    set(motis-compile-options -Wall -Wextra -Werror -Wno-unknown-pragmas -Wno-deprecated-declarations)
+    set(motis-compile-options -Wall -Wextra -Wno-unknown-pragmas -Wno-deprecated-declarations)
 elseif (MSVC)
     set(motis-compile-options
-            /WX
             /bigobj
             # clang-21 libc++ seems not to have a special overloaded std::atomic<std::shared_ptr<T>>
             # check if future version support std::atomic<std::shared_ptr<rt>>
@@ -106,23 +105,44 @@ else ()
     set(motis-compile-options
             -Wall
             -Wextra
+            -Wno-array-bounds
+            -Wno-stringop-overread
+            -Wno-stringop-overflow
             -Wno-mismatched-new-delete
             -Wno-maybe-uninitialized
             -Wno-deprecated-declarations)
-    if (NOT CMAKE_CROSSCOMPILING)
-        set(motis-compile-options ${motis-compile-options} -Werror)
-    endif ()
 endif ()
 
 
 # --- OPENAPI ---
 openapi_generate(openapi.yaml motis-api motis::api)
 
+# --- ITINERARY ID PROTOBUF ---
+add_custom_command(
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/itinerary_id/itinerary_id.pb.h
+    OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/generated/itinerary_id/itinerary_id.pb.cc
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/itinerary_id
+    COMMAND ${CMAKE_CROSSCOMPILING_EMULATOR} $<TARGET_FILE:protoc>
+    --cpp_out=${CMAKE_CURRENT_BINARY_DIR}/generated/itinerary_id
+    --proto_path=${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/itinerary_id.proto
+    DEPENDS protoc
+    DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/itinerary_id.proto
+    COMMENT "Generating itinerary id protocol buffers C++ code"
+)
+add_library(itinerary-id-proto
+    ${CMAKE_CURRENT_BINARY_DIR}/generated/itinerary_id/itinerary_id.pb.cc)
+target_compile_features(itinerary-id-proto PUBLIC cxx_std_23)
+target_link_libraries(itinerary-id-proto protobuf::libprotobuf)
+
 
 # --- LIB ---
 file(GLOB_RECURSE motislib-files src/*.cc)
 add_library(motislib ${motislib-files})
 target_include_directories(motislib PUBLIC include)
+target_include_directories(
+    motislib PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/generated/itinerary_id)
 target_compile_features(motislib PUBLIC cxx_std_23)
 target_compile_options(motislib PRIVATE ${motis-compile-options})
 target_link_libraries(motislib
@@ -132,10 +152,10 @@ target_link_libraries(motislib
     ctx
     boost-json
     motis-api
+    itinerary-id-proto
     reflectcpp
     web-server
     tiles
-    pbf_sdf_fonts_res
     ssl
     crypto
     tg
@@ -145,6 +165,7 @@ target_link_libraries(motislib
     prometheus-cpp::core
     opentelemetry_trace
     opentelemetry_exporter_otlp_http
+    lmdb
     Boost::stacktrace
     "$<${_MOTIS_STACKTRACE_ON}:Boost::stacktrace_from_exception>"
 )
@@ -165,7 +186,6 @@ set_source_files_properties(exe/main.cc PROPERTIES COMPILE_DEFINITIONS MOTIS_VER
 target_link_libraries(motis
     motislib
     ianatzdb-res
-    pbf_sdf_fonts_res-res
     tiles_server_res-res
     address_formatting_res-res
 )
@@ -183,9 +203,14 @@ configure_file(
 )
 file(GLOB_RECURSE motis-test-files test/*.cc)
 add_executable(motis-test ${motis-test-files})
-target_link_libraries(motis-test motislib gtest web-server ianatzdb-res motis-generated)
+target_link_libraries(motis-test
+    motislib
+    gmock
+    web-server
+    ianatzdb-res
+    address_formatting_res-res
+    motis-generated)
 target_compile_options(motis-test PRIVATE ${motis-compile-options})
-
 
 # --- TILES ---
 set_property(

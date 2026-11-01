@@ -6,10 +6,20 @@ export default defineConfig({
 		include: ['src/**/*.{test,spec}.{js,ts}']
 	},
 	server: {
-		fs: { strict: false }
+		fs: { strict: false },
+		proxy: {
+			'/mapterhorn/': {
+				changeOrigin: true,
+				target: 'https://tiles.mapterhorn.com',
+				rewrite: (path) => path.replace(/^\/mapterhorn/, '')
+			}
+		}
 	},
 	build: {
 		sourcemap: true,
+		license: {
+			fileName: 'THIRD_PARTY_LICENSES.md'
+		},
 		rollupOptions: {
 			output: {
 				manualChunks: (id) => {

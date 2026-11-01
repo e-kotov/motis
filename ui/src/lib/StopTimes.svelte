@@ -1,5 +1,6 @@
 <script lang="ts">
 	import {
+		type Mode,
 		stoptimes,
 		type StoptimesError,
 		type StoptimesResponse
@@ -8,41 +9,44 @@
 	import ErrorMessage from '$lib/ErrorMessage.svelte';
 	import Time from '$lib/Time.svelte';
 	import Route from '$lib/Route.svelte';
-	import { Button } from '$lib/components/ui/button';
 	import { language, t } from '$lib/i18n/translation';
 	import type { RequestResult } from '@hey-api/client-fetch';
-	import { onClickStop, onClickTrip } from '$lib/utils';
+	import { isRealtime, onClickTrip } from '$lib/utils';
+	import { normalizedContains } from '$lib/normalizedContains';
 	import { getModeLabel } from './map/getModeLabel';
 	import { posToLocation } from './Location';
 	import type { Location } from './Location';
-	import maplibregl from 'maplibre-gl';
+	import * as maplibregl from 'maplibre-gl';
 	import Alerts from './Alerts.svelte';
 
 	let {
 		stopId,
-		stopName,
 		time: queryTime,
 		stopNameFromResponse = $bindable(),
 		stop = $bindable(),
 		stopMarker = $bindable(),
-		arriveBy
+		arriveBy,
+		modes,
+		exactRadius = false
 	}: {
 		stopId: string;
-		stopName: string;
 		time: Date;
 		arriveBy?: boolean;
 		stopNameFromResponse: string;
 		stop: Location | undefined;
 		stopMarker: maplibregl.Marker | undefined;
+		modes: Mode[];
+		// only show the events of this exact stop (no parent / child / equivalent stops)
+		exactRadius?: boolean;
 	} = $props();
 
 	let query = $derived({
 		stopId,
 		time: queryTime.toISOString(),
 		arriveBy,
+		mode: modes,
+		exactRadius: exactRadius ? true : undefined,
 		n: 10,
-		exactRadius: false,
-		radius: 200,
 		language: [language]
 	});
 	/* eslint-disable svelte/prefer-writable-derived */
@@ -68,21 +72,6 @@
 		});
 </script>
 
-<div class="flex justify-center mb-4">
-	<Button
-		class="font-bold"
-		variant="outline"
-		onclick={() => {
-			onClickStop(stopName, stopId, queryTime, !arriveBy);
-		}}
-	>
-		{#if arriveBy}
-			{t.switchToDepartures}
-		{:else}
-			{t.switchToArrivals}
-		{/if}
-	</Button>
-</div>
 {#each responses as r, rI (rI)}
 	{#await r}
 		<div class="flex items-center justify-center">
@@ -121,7 +110,12 @@
 					<Time
 						variant="schedule"
 						timeZone={stopTime.place.tz}
-						isRealtime={stopTime.realTime}
+						isRealtime={isRealtime(
+							arriveBy
+								? stopTime.place.arrivalTimestampReason
+								: stopTime.place.departureTimestampReason,
+							stopTime.realTime
+						)}
 						{timestamp}
 						{scheduledTimestamp}
 						queriedTime={queryTime.toISOString()}
@@ -130,7 +124,12 @@
 					<Time
 						variant="realtime"
 						timeZone={stopTime.place.tz}
-						isRealtime={stopTime.realTime}
+						isRealtime={isRealtime(
+							arriveBy
+								? stopTime.place.arrivalTimestampReason
+								: stopTime.place.departureTimestampReason,
+							stopTime.realTime
+						)}
 						{timestamp}
 						{scheduledTimestamp}
 						{arriveBy}
@@ -140,7 +139,15 @@
 					<div class="flex justify-between">
 						<Route class="text-ellipsis mb-2" l={stopTime} {onClickTrip} />
 						{#if stopTime.place.track}
-							<span class="text-nowrap ml-3 h-fit px-1 text-base border font-semibold rounded-lg">
+							{@const fullName =
+								(getModeLabel(stopTime.mode) == 'Track' ? t.track : t.platform) +
+								' ' +
+								stopTime.place.track}
+							<span
+								class="text-nowrap ml-3 h-fit px-1 text-base border font-semibold rounded-lg"
+								title={fullName}
+								aria-label={fullName}
+							>
 								{getModeLabel(stopTime.mode) == 'Track' ? t.trackAbr : t.platformAbr}
 								{stopTime.place.track}
 							</span>
@@ -153,7 +160,7 @@
 								{stopTime.headsign}
 								{#if !stopTime.headsign}
 									{stopTime.tripTo.name}
-								{:else if !stopTime.tripTo.name.startsWith(stopTime.headsign)}
+								{:else if !normalizedContains(stopTime.headsign, stopTime.tripTo.name)}
 									<span class="stroke-muted-foreground">({stopTime.tripTo.name})</span>
 								{/if}
 							</span>
@@ -179,7 +186,7 @@
 		{/each}
 		{#if !r.stopTimes.length}
 			<div class="col-span-full w-full flex items-center justify-center">
-				<ErrorMessage message={t.noItinerariesFound} status={404} />
+				<ErrorMessage message={t.noItinerariesFound} status={204} />
 			</div>
 		{/if}
 

@@ -3,10 +3,13 @@ import { twMerge } from 'tailwind-merge';
 import { browser } from '$app/environment';
 import { pushState, replaceState } from '$app/navigation';
 import { page } from '$app/state';
-import { trip } from '@motis-project/motis-client';
+import { trip, type TimestampReason } from '@motis-project/motis-client';
 import { joinInterlinedLegs } from './preprocessItinerary';
 import { language } from './i18n/translation';
 import { tick } from 'svelte';
+
+export const isRealtime = (state: TimestampReason | undefined, fallback: boolean): boolean =>
+	state === undefined ? fallback : state !== 'NO_RT_DATA' && state !== 'INCONSISTENT_RT';
 
 export function cn(...inputs: ClassValue[]) {
 	return twMerge(clsx(inputs));
@@ -67,7 +70,8 @@ export const closeItinerary = () => {
 			page.state.selectedStop.stopId,
 			page.state.selectedStop.time,
 			page.state.stopArriveBy ?? false,
-			true
+			true,
+			page.state.exactRadius ?? false
 		);
 		return;
 	}
@@ -80,12 +84,15 @@ export const onClickStop = (
 	stopId: string,
 	time: Date,
 	arriveBy: boolean = false,
-	replace: boolean = false
+	replace: boolean = false,
+	// only show the events of this exact stop (no parent / child / equivalent stops)
+	exactRadius: boolean = false
 ) => {
 	pushStateWithQueryString(
-		{ stopArriveBy: arriveBy, stopId, time: time.toISOString() },
+		{ stopArriveBy: arriveBy, stopId, time: time.toISOString(), exactRadius },
 		{
 			stopArriveBy: arriveBy,
+			exactRadius,
 			selectedStop: { name, stopId, time },
 			selectedItinerary: replace ? undefined : page.state.selectedItinerary,
 			tripId: replace ? undefined : page.state.tripId,
@@ -104,7 +111,7 @@ export const onClickTrip = async (tripId: string, replace: boolean = false) => {
 		alert(String((error as Record<string, unknown>).error?.toString() ?? error));
 		return;
 	}
-	joinInterlinedLegs(itinerary!);
+	itinerary!.legs = joinInterlinedLegs(itinerary!.legs);
 	pushStateWithQueryString(
 		{ tripId },
 		{

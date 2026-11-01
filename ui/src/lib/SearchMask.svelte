@@ -1,25 +1,27 @@
 <script lang="ts">
 	import { t } from '$lib/i18n/translation';
 	import { ArrowUpDown, LocateFixed } from '@lucide/svelte';
-	import maplibregl from 'maplibre-gl';
-	import * as RadioGroup from '$lib/components/ui/radio-group';
+	import type * as maplibregl from 'maplibre-gl';
 	import Button from '$lib/components/ui/button/button.svelte';
-	import { Label } from '$lib/components/ui/label';
-	import type {
-		ElevationCosts,
-		Mode,
-		PedestrianProfile,
-		ServerConfig
+	import {
+		type CyclingSpeed,
+		type PedestrianSpeed,
+		type ElevationCosts,
+		type Mode,
+		type PedestrianProfile,
+		type ServerConfig
 	} from '@motis-project/motis-client';
 	import AddressTypeahead from '$lib/AddressTypeahead.svelte';
 	import AdvancedOptions from '$lib/AdvancedOptions.svelte';
 	import DateInput from '$lib/DateInput.svelte';
 	import { posToLocation, type Location } from '$lib/Location';
 	import type { PrePostDirectMode } from '$lib/Modes';
+	import DepartureArrivalSwitch from '$lib/DepartureArrivalSwitch.svelte';
 
 	let {
 		geocodingBiasPlace,
 		serverConfig,
+		advancedOptionsOpen = $bindable(),
 		from = $bindable(),
 		to = $bindable(),
 		time = $bindable(),
@@ -29,11 +31,13 @@
 		maxTransfers = $bindable(),
 		requireCarTransport = $bindable(),
 		requireBikeTransport = $bindable(),
+		noCompulsoryReservation = $bindable(),
 		transitModes = $bindable(),
 		preTransitModes = $bindable(),
 		postTransitModes = $bindable(),
 		directModes = $bindable(),
 		elevationCosts = $bindable(),
+		transferTimeFactor = $bindable(),
 		maxPreTransitTime = $bindable(),
 		maxPostTransitTime = $bindable(),
 		maxDirectTime = $bindable(),
@@ -43,12 +47,28 @@
 		preTransitProviderGroups = $bindable(),
 		postTransitProviderGroups = $bindable(),
 		directProviderGroups = $bindable(),
+		vehicleHeight = $bindable(),
+		vehicleWidth = $bindable(),
+		vehicleLength = $bindable(),
+		vehicleWeight = $bindable(),
+		vehicleHazmat = $bindable(),
+		vehicleHazmatWater = $bindable(),
+		vehicleAxleCount = $bindable(),
+		vehicleAxleLoad = $bindable(),
+		vehicleTrailer = $bindable(),
+		vehicleTopSpeed = $bindable(),
+		vehicleLezAccess = $bindable(),
 		via = $bindable(),
 		viaMinimumStay = $bindable(),
-		viaLabels = $bindable()
+		viaLabels = $bindable(),
+		pedestrianSpeed = $bindable(),
+		cyclingSpeed = $bindable(),
+		additionalTransferTime = $bindable(),
+		hasDebug = false
 	}: {
 		geocodingBiasPlace?: maplibregl.LngLatLike;
 		serverConfig: ServerConfig | undefined;
+		advancedOptionsOpen: boolean;
 		from: Location;
 		to: Location;
 		time: Date;
@@ -58,11 +78,13 @@
 		maxTransfers: number;
 		requireCarTransport: boolean;
 		requireBikeTransport: boolean;
+		noCompulsoryReservation: boolean;
 		transitModes: Mode[];
 		preTransitModes: PrePostDirectMode[];
 		postTransitModes: PrePostDirectMode[];
 		directModes: PrePostDirectMode[];
 		elevationCosts: ElevationCosts;
+		transferTimeFactor: number;
 		maxPreTransitTime: number;
 		maxPostTransitTime: number;
 		maxDirectTime: number;
@@ -72,14 +94,28 @@
 		preTransitProviderGroups: string[];
 		postTransitProviderGroups: string[];
 		directProviderGroups: string[];
+		vehicleHeight: number;
+		vehicleWidth: number;
+		vehicleLength: number;
+		vehicleWeight: number;
+		vehicleHazmat: boolean;
+		vehicleHazmatWater: boolean;
+		vehicleAxleCount: number;
+		vehicleAxleLoad: number;
+		vehicleTrailer: boolean;
+		vehicleTopSpeed: number;
+		vehicleLezAccess: boolean;
 		via: undefined | Location[];
 		viaMinimumStay: undefined | number[];
 		viaLabels: Record<string, string>;
+		pedestrianSpeed: PedestrianSpeed;
+		cyclingSpeed: CyclingSpeed;
+		additionalTransferTime: number | undefined;
+		hasDebug: boolean;
 	} = $props();
 
 	let fromItems = $state<Array<Location>>([]);
 	let toItems = $state<Array<Location>>([]);
-
 	const getLocation = () => {
 		if (navigator && navigator.geolocation) {
 			navigator.geolocation.getCurrentPosition(applyPosition, (e) => console.log(e), {
@@ -93,14 +129,17 @@
 	};
 </script>
 
-<div id="searchmask-container" class="flex flex-col space-y-4 p-4 relative">
+<div
+	id="searchmask-container"
+	class="flex max-h-full min-h-0 flex-col space-y-4 overflow-hidden p-4 relative"
+>
 	<AddressTypeahead
 		place={geocodingBiasPlace}
 		name="from"
 		placeholder={t.from}
+		class="pr-8"
 		bind:selected={from}
 		bind:items={fromItems}
-		{transitModes}
 	/>
 	<AddressTypeahead
 		place={geocodingBiasPlace}
@@ -108,10 +147,10 @@
 		placeholder={t.to}
 		bind:selected={to}
 		bind:items={toItems}
-		{transitModes}
 	/>
 	<Button
 		variant="ghost"
+		title={t.myLocation}
 		class="absolute z-10 right-4 top-0"
 		size="icon"
 		onclick={() => getLocation()}
@@ -121,6 +160,7 @@
 	<Button
 		class="absolute z-10 right-14 top-6"
 		variant="outline"
+		title={t.reverseDirections}
 		size="icon"
 		onclick={() => {
 			const tmp = to;
@@ -134,47 +174,27 @@
 	>
 		<ArrowUpDown class="w-5 h-5" />
 	</Button>
-	<div class="flex flex-row gap-2 flex-wrap">
+	<div class="flex min-h-0 flex-row gap-2 flex-wrap">
 		<DateInput bind:value={time} />
-		<RadioGroup.Root
-			class="flex"
-			bind:value={() => (arriveBy ? 'arrival' : 'departure'), (v) => (arriveBy = v === 'arrival')}
-		>
-			<Label
-				for="departure"
-				class="flex items-center rounded-md border-2 border-muted bg-popover p-1 px-2 hover:bg-accent hover:text-accent-foreground [&:has([data-state=checked])]:border-blue-600 hover:cursor-pointer"
-			>
-				<RadioGroup.Item
-					value="departure"
-					id="departure"
-					class="sr-only"
-					aria-label={t.departure}
-				/>
-				<span>{t.departure}</span>
-			</Label>
-			<Label
-				for="arrival"
-				class="flex items-center rounded-md border-2 border-muted bg-popover p-1 px-2 hover:bg-accent hover:text-accent-foreground [&:has([data-state=checked])]:border-blue-600 hover:cursor-pointer"
-			>
-				<RadioGroup.Item value="arrival" id="arrival" class="sr-only" aria-label={t.arrival} />
-				<span>{t.arrival}</span>
-			</Label>
-		</RadioGroup.Root>
+		<DepartureArrivalSwitch bind:arriveBy />
 		<AdvancedOptions
 			{serverConfig}
+			bind:advancedOptionsOpen
 			bind:useRoutedTransfers
 			bind:wheelchair={
 				() => pedestrianProfile === 'WHEELCHAIR',
 				(v) => (pedestrianProfile = v ? 'WHEELCHAIR' : 'FOOT')
 			}
-			bind:requireCarTransport
 			bind:maxTransfers
 			maxTravelTime={undefined}
 			bind:requireBikeTransport
+			bind:requireCarTransport
+			bind:noCompulsoryReservation
 			bind:transitModes
 			bind:preTransitModes
 			bind:postTransitModes
 			bind:directModes
+			bind:transferTimeFactor
 			bind:maxPreTransitTime
 			bind:maxPostTransitTime
 			bind:maxDirectTime
@@ -185,9 +205,25 @@
 			bind:preTransitProviderGroups
 			bind:postTransitProviderGroups
 			bind:directProviderGroups
+			bind:vehicleHeight
+			bind:vehicleWidth
+			bind:vehicleLength
+			bind:vehicleWeight
+			bind:vehicleHazmat
+			bind:vehicleHazmatWater
+			bind:vehicleAxleCount
+			bind:vehicleAxleLoad
+			bind:vehicleTrailer
+			bind:vehicleTopSpeed
+			bind:vehicleLezAccess
 			bind:via
 			bind:viaMinimumStay
 			bind:viaLabels
+			bind:pedestrianSpeed
+			bind:cyclingSpeed
+			bind:additionalTransferTime
+			bind:pedestrianProfile
+			{hasDebug}
 		/>
 	</div>
 </div>

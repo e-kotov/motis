@@ -1,9 +1,9 @@
 #pragma once
 
+#include <algorithm>
 #include <chrono>
 #include <compare>
 #include <cstdint>
-#include <algorithm>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -22,6 +22,8 @@
 #include "geo/box.h"
 #include "geo/latlng.h"
 
+#include "utl/helpers/algorithm.h"
+
 #include "osr/routing/additional_edge.h"
 #include "osr/routing/sharing_data.h"
 #include "osr/types.h"
@@ -35,12 +37,6 @@
 #include "motis/gbfs/lru_cache.h"
 
 namespace motis::gbfs {
-
-enum class gbfs_version : std::uint8_t {
-  k1 = 0,
-  k2 = 1,
-  k3 = 2,
-};
 
 using vehicle_type_idx_t =
     cista::strong<std::uint16_t, struct vehicle_type_idx_>;
@@ -128,6 +124,10 @@ struct station_information {
   std::string address_{};
   std::string cross_street_{};
   rental_uris rental_uris_{};
+  // Number of docks or parking spots, if published by the feed. Gates the
+  // num_docks_available fallback: stations that declare no capacity report
+  // 0 free docks without being full.
+  std::optional<unsigned> capacity_{};
 
   std::shared_ptr<tg_geom> station_area_{};
 
@@ -146,6 +146,10 @@ struct station_status {
   unsigned num_vehicles_available_{};
   hash_map<vehicle_type_idx_t, unsigned> vehicle_types_available_{};
   hash_map<vehicle_type_idx_t, unsigned> vehicle_docks_available_{};
+  // Total number of free docks for feeds that publish the total instead of
+  // per vehicle type counts. std::nullopt if the feed does not publish
+  // num_docks_available; not computed from vehicle_docks_available.
+  std::optional<unsigned> num_docks_available_{};
   bool is_renting_{true};
   bool is_returning_{true};
 };
@@ -170,6 +174,11 @@ struct vehicle_status {
 };
 
 struct rule {
+  bool allows_rental_operation() const {
+    return ride_start_allowed_ || ride_end_allowed_ || ride_through_allowed_ ||
+           station_parking_.value_or(false);
+  }
+
   std::vector<vehicle_type_idx_t> vehicle_type_idxs_{};
   bool ride_start_allowed_{};
   bool ride_end_allowed_{};
@@ -200,6 +209,17 @@ struct zone {
                     geo::latlng{rect.max.y, rect.max.x}};
   }
 
+  bool allows_rental_operation() const {
+    return utl::any_of(
+        rules_, [](rule const& r) { return r.allows_rental_operation(); });
+  }
+
+  bool is_global() const {
+    auto const bb = bounding_box();
+    return bb.max_.lat() >= 90 && bb.max_.lng() >= 180 &&
+           bb.min_.lat() <= -90 && bb.min_.lng() <= -180;
+  }
+
   std::shared_ptr<tg_geom> geom_;
   std::vector<rule> rules_;
   bool clockwise_{true};
@@ -207,7 +227,6 @@ struct zone {
 };
 
 struct geofencing_zones {
-  gbfs_version version_{};
   std::vector<zone> zones_;
   std::vector<rule> global_rules_;
 
@@ -365,10 +384,27 @@ struct gbfs_products_ref {
   gbfs_products_idx_t products_{gbfs_products_idx_t::invalid()};
 };
 
+// Packed (provider, products)
+using gbfs_products_ref_idx_t =
+    cista::strong<std::uint32_t, struct gbfs_products_ref_idx_>;
+
+inline gbfs_products_ref_idx_t to_ref_idx(gbfs_products_ref const r) {
+  return gbfs_products_ref_idx_t{
+      (static_cast<std::uint32_t>(to_idx(r.provider_)) << 16U) |
+      static_cast<std::uint32_t>(to_idx(r.products_))};
+}
+
+inline gbfs_products_ref from_ref_idx(gbfs_products_ref_idx_t const v) {
+  auto const x = to_idx(v);
+  return gbfs_products_ref{
+      gbfs_provider_idx_t{static_cast<std::uint16_t>(x >> 16U)},
+      gbfs_products_idx_t{static_cast<std::uint16_t>(x & 0xFFFFU)}};
+}
+
 struct gbfs_provider {
   std::string id_;  // from config
   gbfs_provider_idx_t idx_{gbfs_provider_idx_t::invalid()};
-  std::string group_id_;
+  std::string group_id_{};
 
   std::shared_ptr<provider_file_infos> file_infos_{};
 
@@ -378,16 +414,24 @@ struct gbfs_provider {
   hash_map<std::pair<std::string, vehicle_start_type>, vehicle_type_idx_t>
       vehicle_types_map_{};
   hash_map<std::string, temp_vehicle_type> temp_vehicle_types_{};
-  std::vector<vehicle_status> vehicle_status_;
+  std::vector<vehicle_status> vehicle_status_{};
   geofencing_zones geofencing_zones_{};
   geofencing_restrictions default_restrictions_{};
   std::optional<return_constraint> default_return_constraint_{};
 
-  vector_map<gbfs_products_idx_t, provider_products> products_;
+  vector_map<gbfs_products_idx_t, provider_products> products_{};
   bool has_vehicles_to_rent_{};
   geo::box bbox_{};
+  std::chrono::system_clock::time_point last_updated_{};
 
   std::optional<std::string> color_{};
+
+  std::uint64_t skipped_station_infos_{};
+  std::uint64_t skipped_station_status_{};
+  std::uint64_t skipped_vehicle_types_{};
+  std::uint64_t skipped_vehicle_status_{};
+  std::uint64_t skipped_geofencing_zones_{};
+  std::uint64_t skipped_geofencing_rules_{};
 };
 
 struct gbfs_group {
@@ -417,7 +461,9 @@ struct provider_feed {
   geofencing_restrictions default_restrictions_{};
   std::optional<return_constraint> default_return_constraint_{};
   std::optional<std::string> config_group_{};
+  std::optional<std::string> config_name_{};
   std::optional<std::string> config_color_{};
+  bool ignore_geofencing_{false};
   std::shared_ptr<oauth_state> oauth_{};
   std::map<std::string, unsigned> default_ttl_{};
   std::map<std::string, unsigned> overwrite_ttl_{};
@@ -436,6 +482,7 @@ struct aggregated_feed {
   std::string id_;
   std::string url_;
   headers_t headers_{};
+  std::optional<std::filesystem::path> dir_{};
   std::optional<std::chrono::system_clock::time_point> expiry_{};
   std::vector<provider_feed> feeds_{};
   std::shared_ptr<oauth_state> oauth_{};
@@ -456,7 +503,8 @@ struct gbfs_data {
 
   vector_map<gbfs_provider_idx_t, std::unique_ptr<gbfs_provider>> providers_{};
   hash_map<std::string, gbfs_provider_idx_t> provider_by_id_{};
-  point_rtree<gbfs_provider_idx_t> provider_rtree_{};
+  point_rtree<gbfs_products_ref_idx_t> car_products_rtree_{};
+  point_rtree<gbfs_products_ref_idx_t> bike_products_rtree_{};
   box_rtree<gbfs_provider_idx_t> provider_zone_rtree_{};
 
   hash_map<std::string, gbfs_group> groups_{};

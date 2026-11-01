@@ -12,6 +12,7 @@
 
 #include "motis/fwd.h"
 #include "motis/place.h"
+#include "motis/transport_mode.h"
 
 namespace motis::ep {
 struct routing;
@@ -99,6 +100,9 @@ struct prima {
   bool consume_ride_sharing_response(std::string_view json);
   bool whitelist_ride_sharing(nigiri::timetable const&);
 
+  void extract_taxis_for_persisting(
+      std::vector<nigiri::routing::journey> const& journeys);
+
   api::plan_params const& query_;
 
   boost::urls::url taxi_blacklist_;
@@ -124,6 +128,11 @@ struct prima {
   nigiri::vecvec<size_t, char> last_mile_ride_sharing_tour_ids_{};
   std::vector<direct_ride> direct_ride_sharing_{};
   nigiri::vecvec<size_t, char> direct_ride_sharing_tour_ids_{};
+
+  std::vector<nigiri::location_idx_t> whitelist_first_mile_locations_;
+  std::vector<nigiri::location_idx_t> whitelist_last_mile_locations_;
+
+  boost::json::object whitelist_response_;
 };
 
 void extract_taxis(std::vector<nigiri::routing::journey> const&,
@@ -134,13 +143,13 @@ void fix_first_mile_duration(
     std::vector<nigiri::routing::journey>& journeys,
     std::vector<nigiri::routing::start> const& first_mile,
     std::vector<nigiri::routing::start> const& prev_first_mile,
-    nigiri::transport_mode_id_t mode);
+    transport_mode_t mode);
 
 void fix_last_mile_duration(
     std::vector<nigiri::routing::journey>& journeys,
     std::vector<nigiri::routing::start> const& last_mile,
     std::vector<nigiri::routing::start> const& prev_last_mile,
-    nigiri::transport_mode_id_t mode);
+    transport_mode_t mode);
 
 std::int64_t to_millis(nigiri::unixtime_t);
 
@@ -163,6 +172,6 @@ void add_direct_odm(std::vector<direct_ride> const&,
                     place_t const& from,
                     place_t const& to,
                     bool arrive_by,
-                    nigiri::transport_mode_id_t);
+                    transport_mode_t);
 
 }  // namespace motis::odm

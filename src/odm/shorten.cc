@@ -8,7 +8,7 @@
 
 #include "motis-api/motis-api.h"
 #include "motis/odm/prima.h"
-#include "motis/transport_mode_ids.h"
+#include "motis/transport_mode.h"
 
 using namespace std::chrono_literals;
 namespace n = nigiri;
@@ -29,7 +29,7 @@ void shorten(std::vector<nr::journey>& odm_journeys,
     auto& odm_leg = begin(j.legs_)[0];
     auto& pt_leg = begin(j.legs_)[1];
 
-    if (!is_odm_leg(odm_leg, kOdmTransportModeId) ||
+    if (!is_odm_leg(odm_leg, kOdmTransportMode) ||
         !std::holds_alternative<nr::journey::run_enter_exit>(pt_leg.uses_)) {
       return;
     }
@@ -45,9 +45,12 @@ void shorten(std::vector<nr::journey>& odm_journeys,
           !stop.in_allowed(query.pedestrianProfile_ ==
                            api::PedestrianProfileEnum::WHEELCHAIR) ||
           (query.requireBikeTransport_ &&
-           !stop.bikes_allowed(n::event_type::kDep)) ||
+           !stop.is_flag_set(nigiri::kBikesAllowed, n::event_type::kDep)) ||
           (query.requireCarTransport_ &&
-           !stop.cars_allowed(n::event_type::kDep))) {
+           !stop.is_flag_set(nigiri::kCarsAllowed, n::event_type::kDep)) ||
+          (query.noCompulsoryReservation_ &&
+           !stop.is_flag_set(nigiri::kReservationNotRequired,
+                             n::event_type::kDep))) {
         continue;
       }
       for (auto const [offset, times] :
@@ -102,7 +105,7 @@ void shorten(std::vector<nr::journey>& odm_journeys,
     auto& odm_leg = rbegin(j.legs_)[0];
     auto& pt_leg = rbegin(j.legs_)[1];
 
-    if (!is_odm_leg(odm_leg, kOdmTransportModeId) ||
+    if (!is_odm_leg(odm_leg, kOdmTransportMode) ||
         !std::holds_alternative<nr::journey::run_enter_exit>(pt_leg.uses_)) {
       return;
     }
@@ -118,9 +121,12 @@ void shorten(std::vector<nr::journey>& odm_journeys,
           !stop.out_allowed(query.pedestrianProfile_ ==
                             api::PedestrianProfileEnum::WHEELCHAIR) ||
           (query.requireBikeTransport_ &&
-           !stop.bikes_allowed(n::event_type::kArr)) ||
+           !stop.is_flag_set(nigiri::kBikesAllowed, n::event_type::kArr)) ||
           (query.requireCarTransport_ &&
-           !stop.cars_allowed(n::event_type::kArr))) {
+           !stop.is_flag_set(nigiri::kCarsAllowed, n::event_type::kArr)) ||
+          (query.noCompulsoryReservation_ &&
+           !stop.is_flag_set(nigiri::kReservationNotRequired,
+                             n::event_type::kArr))) {
         continue;
       }
       for (auto const [offset, times] :

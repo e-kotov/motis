@@ -1,4 +1,5 @@
 #include "motis/metrics_registry.h"
+
 #include "prometheus/histogram.h"
 
 namespace motis {
@@ -19,6 +20,11 @@ metrics_registry::metrics_registry(
                             .Help("Number of routing requests")
                             .Register(registry_)
                             .Add({})},
+      one_to_many_requests_{prometheus::BuildCounter()
+                                .Name("motis_one_to_many_requests_total")
+                                .Help("Number of one to many requests")
+                                .Register(registry_)
+                                .Add({})},
       routing_journeys_found_{prometheus::BuildCounter()
                                   .Name("motis_routing_journeys_found_total")
                                   .Help("Number of journey results")
@@ -99,6 +105,12 @@ metrics_registry::metrics_registry(
               .Help("The total number of transports that have RT data")
               .Register(registry_)
               .Add({})},
+      total_rt_events_count_{
+          prometheus::BuildGauge()
+              .Name("total_rt_events_count")
+              .Help("The total number of arrival/departure events of "
+                    "transports that have RT data, by timestamp reason")
+              .Register(registry_)},
       timetable_first_day_timestamp_{
           prometheus::BuildGauge()
               .Name("nigiri_timetable_first_day_timestamp_seconds")
@@ -122,7 +134,58 @@ metrics_registry::metrics_registry(
           prometheus::BuildGauge()
               .Name("nigiri_timetable_transports_x_days_count")
               .Help("The number of transports x service days in the timetable")
-              .Register(registry_)} {}
+              .Register(registry_)},
+      last_update_{prometheus::BuildGauge()
+                       .Name("nigiri_last_update")
+                       .Help("Timestamp of last RT, GBFS, Elevator updates")
+                       .Register(registry_)},
+      last_update_rt_{last_update_.Add({{"feed", "rt"}})},
+      last_update_gbfs_{last_update_.Add({{"feed", "gbfs"}})},
+      gbfs_last_update_timestamp_seconds_{
+          prometheus::BuildGauge()
+              .Name("motis_gbfs_last_update_timestamp_seconds")
+              .Help("Timestamp of the last GBFS update per provider in which "
+                    "its gbfs.json / manifest.json was valid (0 = never)")
+              .Register(registry_)},
+      gbfs_last_attempted_update_timestamp_seconds_{
+          prometheus::BuildGauge()
+              .Name("motis_gbfs_last_attempted_update_timestamp_seconds")
+              .Help("Timestamp of the last GBFS update per provider in which "
+                    "at least one file was fetched")
+              .Register(registry_)},
+      gbfs_last_successful_update_timestamp_seconds_{
+          prometheus::BuildGauge()
+              .Name("motis_gbfs_last_successful_update_timestamp_seconds")
+              .Help("Timestamp of the last GBFS update per provider in which "
+                    "all fetched files were loaded successfully")
+              .Register(registry_)},
+      gbfs_feed_timestamp_seconds_{
+          prometheus::BuildGauge()
+              .Name("motis_gbfs_feed_timestamp_seconds")
+              .Help("Timestamp from the last_updated field of the GBFS feed")
+              .Register(registry_)},
+      gbfs_vehicle_count_{
+          prometheus::BuildGauge()
+              .Name("motis_gbfs_vehicle_count")
+              .Help("Current number of GBFS vehicles known to MOTIS")
+              .Register(registry_)},
+      gbfs_fetch_errors_total_{
+          prometheus::BuildCounter()
+              .Name("motis_gbfs_fetch_errors_total")
+              .Help("Number of GBFS file fetch or file-level parse errors")
+              .Register(registry_)},
+      gbfs_skipped_entries_total_{
+          prometheus::BuildCounter()
+              .Name("motis_gbfs_skipped_entries_total")
+              .Help("Number of malformed GBFS entries skipped while parsing")
+              .Register(registry_)},
+      gpu_rt_timetable_{
+          prometheus::BuildGauge()
+              .Name("motis_gpu_rt_timetable")
+              .Help("1 if the current RT timetable is uploaded to the GPU, 0 "
+                    "if the upload failed (routing falls back to the CPU)")
+              .Register(registry_)
+              .Add({})} {}
 
 metrics_registry::~metrics_registry() = default;
 

@@ -1,13 +1,12 @@
 /// <reference lib="webworker" />trips
 import polyline from '@mapbox/polyline';
 import { client, trips, type Mode, type TripSegment } from '@motis-project/motis-client';
-import type { Trip, TransferData, MetaData, Query } from './types';
+import type { Trip, TransferData, MetaData } from './types';
 import type { QuerySerializerOptions } from '@hey-api/client-fetch';
 import { getDelayColor, hexToRgb } from './Color';
 import { getModeStyle, getColor } from './modeStyle';
 
 //MATH
-const ease = (t: number) => t * t * (3 - 2 * t);
 const R = 6371;
 const TO_RAD = Math.PI / 180;
 const TO_DEG = 180 / Math.PI;
@@ -50,8 +49,8 @@ let status: number;
 const tripsMap = new Map<string, Trip>();
 const metaDataMap = new Map<string, MetaData>();
 let metadata: MetaData[] = [];
-const fetchData = async (query: Query) => {
-	const { data, response } = await trips({ query });
+const fetchData = async (query: Parameters<typeof trips>[0]) => {
+	const { data, response } = await trips(query);
 	status = response.status;
 	if (!data) return;
 
@@ -74,7 +73,11 @@ const fetchData = async (query: Query) => {
 
 	for (const d of data) {
 		const id = d.trips[0].tripId;
-		const processed = processSegment(d);
+		const precision =
+			'precision' in query.query && typeof query.query.precision === 'number'
+				? query.query.precision
+				: 5;
+		const processed = processSegment(d, precision);
 
 		if (!tripBuilders.has(id)) {
 			tripBuilders.set(id, {
@@ -152,12 +155,12 @@ const fetchData = async (query: Query) => {
 	});
 	metadata = Array.from(metaDataMap.values());
 };
-const processSegment = (s: TripSegment): Trip => {
+const processSegment = (s: TripSegment, precision: number): Trip => {
 	const departure = new Date(s.departure).getTime();
 	const arrival = new Date(s.arrival).getTime();
 	const totalDuration = arrival - departure;
 
-	const decoded = polyline.decode(s.polyline);
+	const decoded = polyline.decode(s.polyline, precision);
 	const count = decoded.length;
 
 	const path = new Float64Array(count * 2);
@@ -254,7 +257,7 @@ function updateState(data: TransferData, colorMode: string) {
 			const t0 = stamps[curr - 1];
 			const t1 = stamps[curr];
 
-			const r = ease((time - t0) / (t1 - t0));
+			const r = (time - t0) / (t1 - t0);
 
 			const prevIdx = 2 * (curr - 1);
 			const nextIdx = 2 * curr;
@@ -287,7 +290,7 @@ self.onmessage = async (e) => {
 			break;
 		}
 		case 'fetch':
-			await fetchData(e.data.query);
+			await fetchData({ query: e.data.query });
 			postMessage({ type: 'fetch-complete', status });
 			break;
 		case 'update': {

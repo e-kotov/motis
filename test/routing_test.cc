@@ -16,16 +16,22 @@
 
 #include "nigiri/rt/gtfsrt_update.h"
 
+#include "net/not_found_exception.h"
+
 #include "motis-api/motis-api.h"
 #include "motis/config.h"
 #include "motis/data.h"
 #include "motis/elevators/elevators.h"
 #include "motis/elevators/parse_fasta.h"
 #include "motis/endpoints/routing.h"
+#include "motis/gbfs/gbfs_output.h"
+#include "motis/gbfs/routing_data.h"
 #include "motis/gbfs/update.h"
 #include "motis/import.h"
-
-#include "net/bad_request_exception.h"
+#include "motis/osr/one_to_many_searches.h"
+#include "motis/place.h"
+#include "motis/tag_lookup.h"
+#include "motis/transport_mode.h"
 
 #include "./util.h"
 
@@ -146,19 +152,23 @@ agency_id,agency_name,agency_url,agency_timezone
 DB,Deutsche Bahn,https://deutschebahn.com,Europe/Berlin
 
 # stops.txt
-stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,platform_code
-DA,DA Hbf,49.87260,8.63085,1,,
-DA_3,DA Hbf,49.87355,8.63003,0,DA,3
-DA_10,DA Hbf,49.87336,8.62926,0,DA,10
-FFM,FFM Hbf,50.10701,8.66341,1,,
-FFM_101,FFM Hbf,50.10739,8.66333,0,FFM,101
-FFM_10,FFM Hbf,50.10593,8.66118,0,FFM,10
-FFM_12,FFM Hbf,50.10658,8.66178,0,FFM,12
-de:6412:10:6:1,FFM Hbf U-Bahn,50.107577,8.6638173,0,FFM,U4
-LANGEN,Langen,49.99359,8.65677,1,,1
-FFM_HAUPT,FFM Hauptwache,50.11403,8.67835,1,,
-FFM_HAUPT_U,Hauptwache U1/U2/U3/U8,50.11385,8.67912,0,FFM_HAUPT,
-FFM_HAUPT_S,FFM Hauptwache S,50.11404,8.67824,0,FFM_HAUPT,
+stop_id,stop_name,stop_lat,stop_lon,location_type,parent_station,platform_code,wheelchair_boarding,stop_code
+DA,DA Hbf,49.87260,8.63085,1,,,1,
+DA_3,DA Hbf,49.87355,8.63003,0,DA,3,1,
+DA_10,DA Hbf,49.87336,8.62926,0,DA,10,1,DA-10-CODE
+FFM,FFM Hbf,50.10701,8.66341,1,,,1,
+FFM_101,FFM Hbf,50.10739,8.66333,0,FFM,101,1,
+FFM_10,FFM Hbf,50.10593,8.66118,0,FFM,10,1,
+FFM_12,FFM Hbf,50.10658,8.66178,0,FFM,12,1,
+de:6412:10:6:1,FFM Hbf U-Bahn,50.107577,8.6638173,0,FFM,U4,1,
+LANGEN,Langen,49.99359,8.65677,1,,1,1,
+FFM_HAUPT,FFM Hauptwache,50.11403,8.67835,1,,,1,
+FFM_HAUPT_U,Hauptwache U1/U2/U3/U8,50.11385,8.67912,0,FFM_HAUPT,,1,
+FFM_HAUPT_S,FFM Hauptwache S,50.11404,8.67824,0,FFM_HAUPT,,1,
+WCH_A,Wheelchair Start,1.0,1.0,0,,,1,
+WCH_B1,Wheelchair accessible intermediate,5.0,0.0,0,,,1,
+WCH_B2,Wheelchair inaccessible intermediate,0.0,5.0,0,,,2,
+WCH_C,Wheelchair destination,10.0,10.0,0,,,1,
 
 # routes.txt
 route_id,agency_id,route_short_name,route_long_name,route_desc,route_type
@@ -167,10 +177,15 @@ U4,DB,U4,,,402
 ICE,DB,ICE,,,101
 
 # trips.txt
-route_id,service_id,trip_id,trip_headsign,block_id
-S3,S1,S3,,
-U4,S1,U4,,
-ICE,S1,ICE,,
+route_id,service_id,trip_id,trip_headsign,block_id,wheelchair_accessible
+S3,S1,S3,,,1
+U4,S1,U4,,,1
+ICE,S1,ICE,,,1
+ICE,S1,WCH_INACCESSIBLE_ICE,,,2
+ICE,S1,WCH_ACCESSIBLE_ICE_A_B1,,,1
+ICE,S1,WCH_ACCESSIBLE_ICE_B1_C,,,1
+ICE,S1,WCH_ACCESSIBLE_ICE_A_B2,,,1
+ICE,S1,WCH_ACCESSIBLE_ICE_B2_C,,,1
 
 # stop_times.txt
 trip_id,arrival_time,departure_time,stop_id,stop_sequence,pickup_type,drop_off_type
@@ -180,6 +195,17 @@ U4,01:05:00,01:05:00,de:6412:10:6:1,0,0,0
 U4,01:10:00,01:10:00,FFM_HAUPT_U,1,0,0
 ICE,00:35:00,00:35:00,DA_10,0,0,0
 ICE,00:45:00,00:45:00,FFM_10,1,0,0
+WCH_INACCESSIBLE_ICE,10:00:00,10:00:00,WCH_A,1,0,0
+WCH_INACCESSIBLE_ICE,10:30:00,10:30:00,WCH_B1,2,0,0
+WCH_INACCESSIBLE_ICE,11:00:00,11:00:00,WCH_C,4,0,0
+WCH_ACCESSIBLE_ICE_A_B1,10:00:00,10:00:00,WCH_A,1,0,0
+WCH_ACCESSIBLE_ICE_A_B1,11:00:00,11:00:00,WCH_B1,2,0,0
+WCH_ACCESSIBLE_ICE_B1_C,12:00:00,12:00:00,WCH_B1,1,0,0
+WCH_ACCESSIBLE_ICE_B1_C,13:00:00,13:00:00,WCH_C,2,0,0
+WCH_ACCESSIBLE_ICE_A_B2,10:00:00,10:00:00,WCH_A,1,0,0
+WCH_ACCESSIBLE_ICE_A_B2,10:45:00,10:45:00,WCH_B2,2,0,0
+WCH_ACCESSIBLE_ICE_B2_C,11:00:00,11:00:00,WCH_B2,1,0,0
+WCH_ACCESSIBLE_ICE_B2_C,12:00:00,12:00:00,WCH_C,2,0,0
 
 # calendar_dates.txt
 service_id,date,exception_type
@@ -190,6 +216,11 @@ trip_id,start_time,end_time,headway_secs
 S3,01:15:00,25:15:00,3600
 ICE,00:35:00,24:35:00,3600
 U4,01:05:00,25:01:00,3600
+
+# transfers.txt
+from_stop_id,to_stop_id,transfer_type,min_transfer_time
+WCH_B1,WCH_B1,0,0
+WCH_B2,WCH_B2,0,0
 )"sv;
 
 void print_short(std::ostream& out, api::Itinerary const& j) {
@@ -239,7 +270,12 @@ void print_short(std::ostream& out, api::Itinerary const& j) {
     auto const print_stop = [&](api::Place const& p) {
       out << p.stopId_.value_or("-") << " [track=" << p.track_.value_or("-")
           << ", scheduled_track=" << p.scheduledTrack_.value_or("-")
-          << ", level=" << p.level_;
+          << ", level=";
+      if (p.level_.has_value()) {
+        out << p.level_.value();
+      } else {
+        out << '-';
+      }
       print_alerts(p);
       out << "]";
     };
@@ -270,10 +306,244 @@ std::string to_str(std::vector<api::Itinerary> const& x) {
   return ss.str();
 }
 
+TEST(motis, routing_osm_only_direct_walk) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/data_osm_only", ec);
+
+  auto const c =
+      config{.server_ = {{.web_folder_ = "ui/build", .n_threads_ = 1U}},
+             .osm_ = {"test/resources/test_case.osm.pbf"},
+             .street_routing_ = true};
+  import(c, "test/data_osm_only");
+  auto d = data{"test/data_osm_only", c};
+
+  auto const routing = utl::init_from<ep::routing>(d).value();
+  auto const res = routing(
+      "?fromPlace=49.87526849014631,8.62771903392948"
+      "&toPlace=49.87253873915287,8.629724234688751"
+      "&time=2019-05-01T01:25Z"
+      "&timetableView=false"
+      "&transitModes="
+      "&directModes=WALK"
+      "&numLegAlternatives=3");
+
+  ASSERT_TRUE(res.itineraries_.empty());
+  ASSERT_EQ(1U, res.direct_.size());
+  ASSERT_EQ(1U, res.direct_.front().legs_.size());
+  EXPECT_EQ(api::ModeEnum::WALK, res.direct_.front().legs_.front().mode_);
+}
+
+TEST(motis, routing_radius_without_osm) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/data_radius", ec);
+
+  auto const c =
+      config{.server_ = {{.web_folder_ = "ui/build", .n_threads_ = 1U}},
+             .timetable_ = config::timetable{
+                 .first_day_ = "2019-05-01",
+                 .num_days_ = 2,
+                 .extend_missing_footpaths_ = false,
+                 .datasets_ = {{"test", {.path_ = std::string{kGTFS}}}}}};
+  import(c, "test/data_radius");
+  auto d = data{"test/data_radius", c};
+
+  auto const routing = utl::init_from<ep::routing>(d).value();
+
+  // fromPlace is ~1962m from DA_10, toPlace is ~1994m from FFM_10.
+  // Without street routing data the offsets are rendered as crow-fly legs.
+  auto const res = routing(
+      "?fromPlace=49.89100,8.62900"
+      "&toPlace=50.08800,8.66100"
+      "&time=2019-05-01T01:30Z"
+      "&radius=5000"
+      "&timetableView=false"
+      "&numLegAlternatives=3");
+
+  ASSERT_FALSE(res.itineraries_.empty());
+  auto const& j = res.itineraries_.front();
+  ASSERT_EQ(3U, j.legs_.size());
+  EXPECT_EQ(api::ModeEnum::WALK, j.legs_.front().mode_);
+  EXPECT_EQ(api::ModeEnum::WALK, j.legs_.back().mode_);
+  EXPECT_EQ("ICE", j.legs_[1].routeShortName_.value_or("-"));
+  // dist / kWalkSpeed, truncated to whole minutes: 1962m -> 21min,
+  // 1994m -> 22min.
+  EXPECT_EQ(21 * 60, j.legs_.front().duration_);
+  EXPECT_EQ(22 * 60, j.legs_.back().duration_);
+}
+
+TEST(motis, routing_unknown_feed_id) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/data_radius", ec);
+
+  auto const c =
+      config{.server_ = {{.web_folder_ = "ui/build", .n_threads_ = 1U}},
+             .timetable_ = config::timetable{
+                 .first_day_ = "2019-05-01",
+                 .num_days_ = 2,
+                 .extend_missing_footpaths_ = false,
+                 .datasets_ = {{"test", {.path_ = std::string{kGTFS}}}}}};
+  import(c, "test/data_radius");
+  auto d = data{"test/data_radius", c};
+
+  auto const routing = utl::init_from<ep::routing>(d).value();
+
+  // unknown feed id -> HTTP 404 with a clear message, not a crash
+  EXPECT_THROW(routing("?fromPlace=unknown_DA_10"
+                       "&toPlace=50.08800,8.66100"
+                       "&time=2019-05-01T01:30Z"
+                       "&timetableView=false"),
+               net::not_found_exception);
+}
+
+TEST(motis, routing_post_client_offsets) {
+  auto ec = std::error_code{};
+  std::filesystem::remove_all("test/data_plan_post", ec);
+
+  auto const c =
+      config{.server_ = {{.web_folder_ = "ui/build", .n_threads_ = 1U}},
+             .timetable_ = config::timetable{
+                 .first_day_ = "2019-05-01",
+                 .num_days_ = 2,
+                 .extend_missing_footpaths_ = false,
+                 .datasets_ = {{"test", {.path_ = std::string{kGTFS}}}}}};
+  import(c, "test/data_plan_post");
+  auto d = data{"test/data_plan_post", c};
+
+  auto const get = utl::init_from<ep::routing>(d).value();
+  auto const post = utl::init_from<ep::routing_post>(d).value();
+
+  // exercises the generated JSON parsing the query router uses
+  auto const to_body = [](api::PlanPostBody const& b) {
+    return json::value_to<api::PlanPostBody>(json::value_from(b));
+  };
+
+  constexpr auto const kUrl =
+      "/api/v6/plan"
+      "?fromPlace=49.89100,8.62900"
+      "&toPlace=50.08800,8.66100"
+      "&time=2019-05-01T01:30Z"
+      "&timetableView=false"
+      "&numLegAlternatives=3";
+
+  // client-computed offsets replace the server-side offset computation
+  {
+    auto const body = to_body(api::PlanPostBody{
+        .fromOffsets_ = {{{.stopId_ = "test_DA_10", .duration_ = 21 * 60}}},
+        .toOffsets_ = {{{.stopId_ = "test_FFM_10", .duration_ = 22 * 60}}}});
+
+    auto const res = post(kUrl, body);
+    ASSERT_FALSE(res.itineraries_.empty());
+    auto const& j = res.itineraries_.front();
+    ASSERT_EQ(3U, j.legs_.size());
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.front().mode_);
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.back().mode_);
+    EXPECT_EQ("ICE", j.legs_[1].routeShortName_.value_or("-"));
+    EXPECT_EQ(21 * 60, j.legs_.front().duration_);
+    EXPECT_EQ(22 * 60, j.legs_.back().duration_);
+  }
+
+  // arriveBy=true: fromOffsets still attach to the fromPlace side (the
+  // first leg), toOffsets to the toPlace side (the last leg)
+  {
+    auto const body = to_body(api::PlanPostBody{
+        .fromOffsets_ = {{{.stopId_ = "test_DA_10", .duration_ = 21 * 60}}},
+        .toOffsets_ = {{{.stopId_ = "test_FFM_10", .duration_ = 22 * 60}}}});
+
+    auto const res = post(
+        "/api/v6/plan"
+        "?fromPlace=49.89100,8.62900"
+        "&toPlace=50.08800,8.66100"
+        "&time=2019-05-01T02:10Z"
+        "&arriveBy=true"
+        "&timetableView=false"
+        "&numLegAlternatives=3",
+        body);
+    ASSERT_FALSE(res.itineraries_.empty());
+    auto const& j = res.itineraries_.front();
+    ASSERT_EQ(3U, j.legs_.size());
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.front().mode_);
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.back().mode_);
+    EXPECT_EQ("ICE", j.legs_[1].routeShortName_.value_or("-"));
+    EXPECT_EQ(21 * 60, j.legs_.front().duration_);
+    EXPECT_EQ(22 * 60, j.legs_.back().duration_);
+  }
+
+  // parent stations are expanded to their child stops: DA_10 / FFM_10 are
+  // only reachable through the parents given here
+  {
+    auto const body = to_body(api::PlanPostBody{
+        .fromOffsets_ = {{{.stopId_ = "test_DA", .duration_ = 21 * 60}}},
+        .toOffsets_ = {{{.stopId_ = "test_FFM", .duration_ = 22 * 60}}}});
+
+    auto const res = post(kUrl, body);
+    ASSERT_FALSE(res.itineraries_.empty());
+    auto const& j = res.itineraries_.front();
+    ASSERT_EQ(3U, j.legs_.size());
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.front().mode_);
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.back().mode_);
+    EXPECT_EQ("ICE", j.legs_[1].routeShortName_.value_or("-"));
+    EXPECT_EQ(21 * 60, j.legs_.front().duration_);
+    EXPECT_EQ(22 * 60, j.legs_.back().duration_);
+  }
+
+  // empty body / empty lists = same behavior as GET
+  {
+    auto const url_with_radius = std::string{kUrl} + "&radius=5000";
+    auto const get_itineraries = get(url_with_radius).itineraries_;
+    EXPECT_EQ(get_itineraries,
+              post(url_with_radius, to_body(api::PlanPostBody{})).itineraries_);
+    EXPECT_EQ(get_itineraries,
+              post(url_with_radius,
+                   to_body(api::PlanPostBody{
+                       .fromOffsets_ = std::vector<api::PlanOffset>{},
+                       .toOffsets_ = std::vector<api::PlanOffset>{}}))
+                  .itineraries_);
+  }
+
+  // fromOffsets only, station id as destination
+  {
+    constexpr auto const kToStationUrl =
+        "/api/v6/plan"
+        "?fromPlace=49.89100,8.62900"
+        "&toPlace=test_FFM_10"
+        "&time=2019-05-01T01:30Z"
+        "&timetableView=false"
+        "&numLegAlternatives=3";
+    auto const body = to_body(api::PlanPostBody{
+        .fromOffsets_ = {{{.stopId_ = "test_DA_10", .duration_ = 21 * 60}}}});
+    auto const res = post(kToStationUrl, body);
+    ASSERT_FALSE(res.itineraries_.empty());
+    auto const& j = res.itineraries_.front();
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.front().mode_);
+    EXPECT_EQ(21 * 60, j.legs_.front().duration_);
+    EXPECT_TRUE(utl::any_of(j.legs_, [](auto const& l) {
+      return l.routeShortName_.value_or("-") == "ICE";
+    }));
+  }
+
+  // errors: unknown stop id, unsupported mode, negative duration
+  EXPECT_ANY_THROW(post(
+      kUrl,
+      to_body(api::PlanPostBody{
+          .fromOffsets_ = {{{.stopId_ = "test_NOPE", .duration_ = 60}}},
+          .toOffsets_ = {{{.stopId_ = "test_FFM_10", .duration_ = 60}}}})));
+  EXPECT_ANY_THROW(post(
+      kUrl,
+      to_body(api::PlanPostBody{
+          .fromOffsets_ = {{{.stopId_ = "test_DA_10",
+                             .duration_ = 60,
+                             .mode_ = api::ModeEnum::FLEX}}},
+          .toOffsets_ = {{{.stopId_ = "test_FFM_10", .duration_ = 60}}}})));
+  EXPECT_ANY_THROW(post(
+      kUrl,
+      to_body(api::PlanPostBody{
+          .fromOffsets_ = {{{.stopId_ = "test_DA_10", .duration_ = -1}}},
+          .toOffsets_ = {{{.stopId_ = "test_FFM_10", .duration_ = 60}}}})));
+}
+
 TEST(motis, routing) {
   auto ec = std::error_code{};
-  auto const data_dir = std::filesystem::current_path() / "tmp_motis_test_data";
-  std::filesystem::remove_all(data_dir, ec);
+  std::filesystem::remove_all("test/data", ec);
 
   auto const c = config{
       .server_ = {{.web_folder_ = "ui/build", .n_threads_ = 1U}},
@@ -284,7 +554,6 @@ TEST(motis, routing) {
           config::timetable{
               .first_day_ = "2019-05-01",
               .num_days_ = 2,
-              .use_osm_stop_coordinates_ = true,
               .extend_missing_footpaths_ = false,
               .datasets_ = {{"test", {.path_ = std::string{kGTFS}}}}},
       .gbfs_ = {{.feeds_ = {{"CAB", {.url_ = "./test/resources/gbfs"}}}}},
@@ -292,8 +561,9 @@ TEST(motis, routing) {
       .osr_footpath_ = true,
       .geocoding_ = true,
       .reverse_geocoding_ = true};
-  auto d = import(c, data_dir, true);
-  d.rt_->e_ = std::make_unique<elevators>(*d.w_, *d.elevator_nodes_,
+  import(c, "test/data");
+  auto d = data{"test/data", c};
+  d.rt_->e_ = std::make_unique<elevators>(*d.w_, nullptr, *d.elevator_nodes_,
                                           parse_fasta(kFastaJson));
   d.init_rtt(date::sys_days{2019_y / May / 1});
 
@@ -302,7 +572,7 @@ TEST(motis, routing) {
     boost::asio::co_spawn(
         ioc,
         [&]() -> boost::asio::awaitable<void> {
-          co_await gbfs::update(c, *d.w_, *d.l_, d.gbfs_);
+          co_await gbfs::update(c, *d.w_, *d.l_, d.gbfs_, d.metrics_.get());
         },
         boost::asio::detached);
     ioc.run();
@@ -311,191 +581,63 @@ TEST(motis, routing) {
   auto const routing = utl::init_from<ep::routing>(d).value();
   EXPECT_EQ(d.rt_->rtt_.get(), routing.rt_->rtt_.get());
 
-  // Route with TAD algorithm and verify exactly 1 journey is returned.
+  // Explicit TAD requests must reach TAD even in a CUDA-enabled build.
+  // Point-query parity is independent of the sparse transfer-index experiment.
   {
-    auto const res_tad = routing(
-        "?fromPlace=test_DA"
-        "&toPlace=test_FFM"
-        "&time=2019-05-01T01:25Z"
-        "&timetableView=false"
-        "&algorithm=TAD");
+    auto const query = std::string{
+        "?fromPlace=test_DA&toPlace=test_FFM"
+        "&time=2019-05-01T01:25Z&timetableView=false"};
+    auto const tad = routing(query + "&algorithm=TAD");
+    auto const raptor = routing(query + "&algorithm=RAPTOR");
+    ASSERT_FALSE(tad.itineraries_.empty());
+    ASSERT_FALSE(raptor.itineraries_.empty());
+    EXPECT_EQ(static_cast<std::uint64_t>(api::algorithmEnum::TAD),
+              tad.debugOutput_.at("algorithm"));
+    EXPECT_EQ(raptor.itineraries_.front().endTime_,
+              tad.itineraries_.front().endTime_);
+    EXPECT_EQ(raptor.itineraries_.front().startTime_,
+              tad.itineraries_.front().startTime_);
 
-    EXPECT_GT(res_tad.itineraries_.size(), 0U);
-    EXPECT_EQ(
-        R"(date=2019-05-01, start=01:35, end=01:45, duration=00:10, transfers=0, legs=[
-    (from=test_DA_10 [track=10, scheduled_track=10, level=-1], to=test_FFM_10 [track=10, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:45)
-])",
-        to_str(res_tad.itineraries_));
+    auto const filtered = routing(query + "&algorithm=TAD&transitModes=SUBWAY");
+    EXPECT_TRUE(filtered.itineraries_.empty());
+
+    // TAD has no reservation predicate yet. Preserve that request through the
+    // existing RAPTOR implementation, and report the algorithm actually used.
+    auto const fallback =
+        routing(query + "&algorithm=TAD&noCompulsoryReservation=true");
+    auto const constrained_raptor =
+        routing(query + "&algorithm=RAPTOR&noCompulsoryReservation=true");
+    ASSERT_FALSE(fallback.itineraries_.empty());
+    ASSERT_FALSE(constrained_raptor.itineraries_.empty());
+    EXPECT_EQ(static_cast<std::uint64_t>(api::algorithmEnum::RAPTOR),
+              fallback.debugOutput_.at("algorithm"));
+    EXPECT_EQ(constrained_raptor.itineraries_.front().endTime_,
+              fallback.itineraries_.front().endTime_);
   }
 
-  // Phase 0: TAD Rejection Contract Tests & Phase 2/3 Parity Tests
-  // Executed BEFORE real-time data is injected into the environment.
-  {
-    auto const base_query = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T01:25Z&numItineraries=1";
-
-    // 1. arriveBy is now SUPPORTED by TAD (Phase 5)
-    {
-      auto const base = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T02:00Z&arriveBy=true&numItineraries=1";
-      auto const raptor_res = routing(base + std::string("&algorithm=RAPTOR"));
-      auto const tad_res = routing(base + std::string("&algorithm=TAD"));
-      EXPECT_GT(raptor_res.itineraries_.size(), 0U);
-      EXPECT_GT(tad_res.itineraries_.size(), 0U);
-      
-      bool found = false;
-      if (!tad_res.itineraries_.empty()) {
-        for (auto const& it : raptor_res.itineraries_) {
-          if (it.startTime_ == tad_res.itineraries_.front().startTime_ &&
-              it.endTime_ == tad_res.itineraries_.front().endTime_ &&
-              it.legs_.size() == tad_res.itineraries_.front().legs_.size()) {
-            bool legs_match = true;
-            for (size_t i = 0; i < it.legs_.size(); ++i) {
-              if (it.legs_[i].mode_ != tad_res.itineraries_.front().legs_[i].mode_ ||
-                  it.legs_[i].tripId_ != tad_res.itineraries_.front().legs_[i].tripId_ ||
-                  it.legs_[i].from_.name_ != tad_res.itineraries_.front().legs_[i].from_.name_ ||
-                  it.legs_[i].to_.name_ != tad_res.itineraries_.front().legs_[i].to_.name_) {
-                legs_match = false;
-                break;
-              }
-            }
-            if (legs_match) {
-              found = true;
-              break;
-            }
-          }
-        }
-      }
-      EXPECT_TRUE(found) << "TAD itinerary not found in RAPTOR's Pareto set. TAD string: " << to_str(tad_res.itineraries_);
-      
-      // arriveBy test: verify that the arrival time respects the query constraint
-      // 2019-05-01T02:00Z -> 1556676000
-      if (!tad_res.itineraries_.empty()) {
-        EXPECT_LE(static_cast<std::chrono::sys_seconds>(tad_res.itineraries_.front().endTime_).time_since_epoch().count(), 1556676000);
-      }
-    }
-
-    // 2. Coordinate / time-dependent offsets are now SUPPORTED by TAD (Phase 2)
-    {
-      auto const base = "?fromPlace=49.87526849014631,8.62771903392948&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&numItineraries=1";
-      auto const raptor_res = routing(base + std::string("&algorithm=RAPTOR"));
-      auto const tad_res = routing(base + std::string("&algorithm=TAD"));
-      
-      EXPECT_GT(raptor_res.itineraries_.size(), 0U);
-      EXPECT_GT(tad_res.itineraries_.size(), 0U);
-      // Compare Earliest Arrival Time (oracle test)
-      EXPECT_EQ(raptor_res.itineraries_.front().endTime_, tad_res.itineraries_.front().endTime_);
-    }
-    
-    // 3. Via routing is now SUPPORTED by TAD (Phase 6)
-    {
-      auto const via_query = "?fromPlace=test_DA&toPlace=test_FFM_HAUPT&time=2019-05-01T01:25Z&via=test_FFM";
-      auto const raptor_via = routing(via_query + std::string("&algorithm=RAPTOR"));
-      auto const tad_via = routing(via_query + std::string("&algorithm=TAD"));
-      EXPECT_GT(raptor_via.itineraries_.size(), 0U);
-      EXPECT_GT(tad_via.itineraries_.size(), 0U);
-      EXPECT_EQ(raptor_via.itineraries_.front().endTime_, tad_via.itineraries_.front().endTime_);
-
-      bool via_stop_found = false;
-      auto const& legs = tad_via.itineraries_.front().legs_;
-      ASSERT_GE(legs.size(), 2U);
-      auto const is_via_stop = [](std::string_view id) {
-        return id.starts_with("test_FFM") && !id.starts_with("test_FFM_HAUPT");
-      };
-      for (std::size_t i = 0; i + 1 < legs.size(); ++i) {
-        auto const to_id = legs[i].to_.stopId_.value_or("");
-        auto const from_id = legs[i + 1].from_.stopId_.value_or("");
-        if (is_via_stop(to_id) && is_via_stop(from_id)) {
-          via_stop_found = true;
-          break;
-        }
-      }
-      EXPECT_TRUE(via_stop_found);
-    }
-
-    // 4-7. Phase 3 Constraints are now SUPPORTED by TAD (Phase 3)
-    {
-      // Baseline without constraints
-      auto const t_base = routing(base_query + std::string("&algorithm=TAD"));
-      EXPECT_GT(t_base.itineraries_.size(), 0U);
-
-      // 4. Vehicle transport (e.g. bike/car)
-      auto const t_car = routing("?fromPlace=49.87526849014631,8.62771903392948&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&numItineraries=1&preTransitModes=CAR&algorithm=TAD");
-      EXPECT_GT(t_car.itineraries_.size(), 0U);
-      // Property test: The first leg should be using a CAR.
-      EXPECT_EQ(t_car.itineraries_.front().legs_.front().mode_, motis::api::ModeEnum::CAR);
-      
-      // 5. Filtered classes (Adversarial test: allow only SUBWAY, which doesn't exist between DA and FFM directly)
-      auto const t_subway = routing(base_query + std::string("&transitModes=SUBWAY&algorithm=TAD"));
-      EXPECT_EQ(t_subway.itineraries_.size(), 0U); // Unreachable with only SUBWAY
-
-      auto const t_class = routing(base_query + std::string("&transitModes=HIGHSPEED_RAIL&algorithm=TAD"));
-      EXPECT_GT(t_class.itineraries_.size(), 0U);
-      for (const auto& leg : t_class.itineraries_.front().legs_) {
-        if (leg.mode_ != motis::api::ModeEnum::WALK) {
-          EXPECT_EQ(leg.mode_, motis::api::ModeEnum::HIGHSPEED_RAIL);
-        }
-      }
-      
-      // 6. Non-default pedestrian profile (Wheelchair)
-      // Adversarial test: route requiring wheelchair should fail or take longer if inaccessible.
-      auto const wc_query = "?fromPlace=49.87263,8.63127&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&useRoutedTransfers=true&timetableView=false";
-      auto const t_prof_base = routing(wc_query + std::string("&algorithm=TAD"));
-      auto const t_prof_wc = routing(wc_query + std::string("&pedestrianProfile=WHEELCHAIR&algorithm=TAD"));
-      auto const r_prof_wc = routing(wc_query + std::string("&pedestrianProfile=WHEELCHAIR&algorithm=RAPTOR"));
-      
-      EXPECT_GT(t_prof_base.itineraries_.size(), 0U);
-      EXPECT_GT(t_prof_wc.itineraries_.size(), 0U);
-      EXPECT_GT(r_prof_wc.itineraries_.size(), 0U);
-      
-      // Wheelchair profile takes a longer/different route than base profile
-      EXPECT_NE(t_prof_base.itineraries_.front().endTime_, t_prof_wc.itineraries_.front().endTime_);
-      // But TAD matches RAPTOR's arrival time for wheelchair
-      EXPECT_EQ(r_prof_wc.itineraries_.front().endTime_, t_prof_wc.itineraries_.front().endTime_);
-      
-      // 7. Custom transfer time settings
-      auto const t_trans = routing(base_query + std::string("&transferPenalty=60&algorithm=TAD"));
-      EXPECT_GT(t_trans.itineraries_.size(), 0U);
-      // Property test: The route should still be valid and arrive no later than the base without penalty (since 0 transfers)
-      EXPECT_EQ(t_trans.itineraries_.front().endTime_, t_base.itineraries_.front().endTime_);
-    }
-  }
-
-  auto const stats =
-      n::rt::gtfsrt_update_msg(*d.tt_, *d.rt_->rtt_, n::source_idx_t{0}, "test",
-                               test::to_feed_msg(
-                                   {test::trip_update{
-                                        .trip_ = {.trip_id_ = "ICE",
-                                                  .start_time_ = {"03:35:00"},
-                                                  .date_ = {"20190501"}},
-                                        .stop_updates_ =
-                                            {{.stop_id_ = "FFM_12",
-                                              .seq_ = std::optional{1U},
-                                              .ev_type_ = n::event_type::kArr,
-                                              .delay_minutes_ = 10,
-                                              .stop_assignment_ = "FFM_12"}}},
-                                    test::alert{.header_ = "Yeah",
-                                                .description_ = "Yeah!!",
-                                                .entities_ =
-                                                    {{.trip_ =
-                                                          {
-                                                              {.trip_id_ =
-                                                                   "ICE",
-                                                               .start_time_ = {"03:35:00"},
-                                                               .date_ = {"20"
-                                                                         "19"
-                                                                         "05"
-                                                                         "0"
-                                                                         "1"}},
-                                                          },
-                                                      .stop_id_ = "DA"}}},
-                                    test::alert{
-                                        .header_ = "Hello",
-                                        .description_ = "World",
-                                        .entities_ =
-                                            {{.trip_ =
-                                                  {{.trip_id_ = "ICE",
-                                                    .start_time_ = {"03:35:00"},
-                                                    .date_ = {"20190501"}}}}}}},
-                                   date::sys_days{2019_y / May / 1} + 9h));
+  auto const stats = n::rt::gtfsrt_update_msg(
+      *d.tt_, *d.rt_->rtt_, n::source_idx_t{0}, "test",
+      test::to_feed_msg(
+          {test::trip_update{.trip_ = {.trip_id_ = "ICE",
+                                       .start_time_ = {"03:35:00"},
+                                       .date_ = {"20190501"}},
+                             .stop_updates_ = {{.stop_id_ = "FFM_12",
+                                                .seq_ = std::optional{1U},
+                                                .ev_type_ = n::event_type::kArr,
+                                                .delay_minutes_ = 10,
+                                                .stop_assignment_ = "FFM_12"}}},
+           test::alert{.header_ = "Yeah",
+                       .description_ = "Yeah!!",
+                       .entities_ = {{.trip_ = {{.trip_id_ = "ICE",
+                                                 .start_time_ = {"03:35:00"},
+                                                 .date_ = {"20190501"}}},
+                                      .stop_id_ = "DA"}}},
+           test::alert{.header_ = "Hello",
+                       .description_ = "World",
+                       .entities_ = {{.trip_ = {{.trip_id_ = "ICE",
+                                                 .start_time_ = {"03:35:00"},
+                                                 .date_ = {"20190501"}}}}}}},
+          date::sys_days{2019_y / May / 1} + 9h));
   EXPECT_EQ(1U, stats.total_entities_success_);
   EXPECT_EQ(2U, stats.alert_total_resolve_success_);
 
@@ -506,17 +648,53 @@ TEST(motis, routing) {
         "&toPlace=49.87253873915287,8.629724234688751"
         "&time=2019-05-01T01:25Z"
         "&timetableView=false"
-        "&directModes=WALK,RENTAL");
+        "&directModes=WALK,RENTAL"
+        "&numLegAlternatives=3");
+    ASSERT_FALSE(res.direct_.empty());
+    ASSERT_FALSE(res.direct_.front().legs_.empty());
+    EXPECT_GT(res.direct_.front().legs_.front().legGeometry_.length_, 0);
+
+    ASSERT_TRUE(res.direct_.front().legs_.front().steps_.has_value());
+    auto const& steps = *res.direct_.front().legs_.front().steps_;
+    ASSERT_GE(steps.size(), 2);
+
+    // additional edge
+    EXPECT_FALSE(steps[0].osmWay_.has_value());
+    EXPECT_FALSE(steps[0].fromOsmNode_.has_value());
+    EXPECT_TRUE(steps[0].toOsmNode_.has_value());
+    EXPECT_EQ(533673, steps[0].toOsmNode_);
+
+    EXPECT_FALSE(steps[1].osmWay_.has_value());
+    EXPECT_TRUE(steps[1].fromOsmNode_.has_value());
+    EXPECT_FALSE(steps[1].toOsmNode_.has_value());
+    EXPECT_EQ(533673, steps[1].fromOsmNode_);
 
     EXPECT_EQ(
-        R"(date=2019-05-01, start=01:25, end=01:36, duration=00:11, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 01:25, mode="WALK", trip="-", end=2019-05-01 01:26),
-    (from=- [track=-, scheduled_track=-, level=0], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 01:26, mode="RENTAL", trip="-", end=2019-05-01 01:27),
-    (from=- [track=-, scheduled_track=-, level=0], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 01:27, mode="WALK", trip="-", end=2019-05-01 01:36)
-]date=2019-05-01, start=01:25, end=01:36, duration=00:11, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 01:25, mode="WALK", trip="-", end=2019-05-01 01:36)
+        R"(date=2019-05-01, start=01:25, end=01:34, duration=00:09, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 01:25, mode="WALK", trip="-", end=2019-05-01 01:25),
+    (from=- [track=-, scheduled_track=-, level=-], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 01:25, mode="RENTAL", trip="-", end=2019-05-01 01:26),
+    (from=- [track=-, scheduled_track=-, level=-], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 01:26, mode="WALK", trip="-", end=2019-05-01 01:34)
+]date=2019-05-01, start=01:25, end=01:35, duration=00:10, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 01:25, mode="WALK", trip="-", end=2019-05-01 01:35)
 ])",
         to_str(res.direct_));
+
+    auto const compact_res = routing(
+        "?fromPlace=49.87526849014631,8.62771903392948"
+        "&toPlace=49.87253873915287,8.629724234688751"
+        "&time=2019-05-01T01:25Z"
+        "&timetableView=false"
+        "&directModes=WALK,RENTAL"
+        "&detailedLegs=false"
+        "&numLegAlternatives=3");
+    ASSERT_FALSE(compact_res.direct_.empty());
+    for (auto const& itinerary : compact_res.direct_) {
+      for (auto const& leg : itinerary.legs_) {
+        EXPECT_EQ("", leg.legGeometry_.points_);
+        EXPECT_EQ(0, leg.legGeometry_.length_);
+        EXPECT_FALSE(leg.steps_.has_value());
+      }
+    }
   }
 
   // Route with GBFS.
@@ -527,19 +705,25 @@ TEST(motis, routing) {
         "&time=2019-05-01T01:21Z"
         "&timetableView=false"
         "&useRoutedTransfers=true"
-        "&preTransitModes=WALK,RENTAL");
+        "&preTransitModes=WALK,RENTAL"
+        "&numLegAlternatives=3");
 
     EXPECT_EQ(
-        R"(date=2019-05-01, start=01:21, end=02:15, duration=00:54, transfers=1, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 01:21, mode="WALK", trip="-", end=2019-05-01 01:22),
-    (from=- [track=-, scheduled_track=-, level=0], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 01:22, mode="RENTAL", trip="-", end=2019-05-01 01:24),
-    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:24, mode="WALK", trip="-", end=2019-05-01 01:35),
+        R"(date=2019-05-01, start=01:23, end=02:15, duration=00:52, transfers=1, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 01:23, mode="WALK", trip="-", end=2019-05-01 01:23),
+    (from=- [track=-, scheduled_track=-, level=-], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 01:23, mode="RENTAL", trip="-", end=2019-05-01 01:24),
+    (from=- [track=-, scheduled_track=-, level=-], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:24, mode="WALK", trip="-", end=2019-05-01 01:35),
     (from=test_DA_10 [track=10, scheduled_track=10, level=-1, alerts=["Yeah"]], to=test_FFM_12 [track=12, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:55, alerts=["Hello"]),
-    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], start=2019-05-01 01:55, mode="WALK", trip="-", end=2019-05-01 02:00),
+    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], start=2019-05-01 01:55, mode="WALK", trip="-", end=2019-05-01 01:59),
     (from=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], to=test_FFM_HAUPT_U [track=-, scheduled_track=-, level=-4], start=2019-05-01 02:05, mode="SUBWAY", trip="U4", end=2019-05-01 02:10),
-    (from=test_FFM_HAUPT_U [track=-, scheduled_track=-, level=-4], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 02:10, mode="WALK", trip="-", end=2019-05-01 02:15)
+    (from=test_FFM_HAUPT_U [track=-, scheduled_track=-, level=-4], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 02:10, mode="WALK", trip="-", end=2019-05-01 02:15)
 ])",
         to_str(res.itineraries_));
+
+    // Verify stop_code propagation from GTFS through API.
+    auto const& ice_leg = res.itineraries_.at(0).legs_.at(3);
+    EXPECT_EQ("DA-10-CODE", ice_leg.from_.stopCode_);
+    EXPECT_FALSE(ice_leg.to_.stopCode_.has_value());
   }
 
   // Routing with temporary blocked paths due to elevator being out of service
@@ -557,13 +741,14 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match closely for wheelchair
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=01:16, end=02:29, duration=01:14, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 01:16, mode="WALK", trip="-", end=2019-05-01 01:30),
+          R"(date=2019-05-01, start=01:15, end=02:30, duration=01:15, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 01:15, mode="WALK", trip="-", end=2019-05-01 01:30),
     (from=test_FFM_101 [track=101, scheduled_track=101, level=-3], to=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:15, mode="METRO", trip="S3", end=2019-05-01 02:20),
-    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 02:20, mode="WALK", trip="-", end=2019-05-01 02:29)
+    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 02:20, mode="WALK", trip="-", end=2019-05-01 02:30)
 ])",
           to_str(res.itineraries_));
     }
@@ -579,13 +764,14 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match closely for wheelchair
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=03:01, end=03:29, duration=02:09, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 03:01, mode="WALK", trip="-", end=2019-05-01 03:15),
+          R"(date=2019-05-01, start=03:00, end=03:30, duration=00:30, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 03:00, mode="WALK", trip="-", end=2019-05-01 03:15),
     (from=test_FFM_101 [track=101, scheduled_track=101, level=-3], to=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], start=2019-05-01 03:15, mode="METRO", trip="S3", end=2019-05-01 03:20),
-    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 03:20, mode="WALK", trip="-", end=2019-05-01 03:29)
+    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 03:20, mode="WALK", trip="-", end=2019-05-01 03:30)
 ])",
           to_str(res.itineraries_));
     }
@@ -601,13 +787,14 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match closely for wheelchair
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=01:16, end=02:29, duration=01:14, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 01:16, mode="WALK", trip="-", end=2019-05-01 01:30),
+          R"(date=2019-05-01, start=01:15, end=02:30, duration=01:15, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 01:15, mode="WALK", trip="-", end=2019-05-01 01:30),
     (from=test_FFM_101 [track=101, scheduled_track=101, level=-3], to=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:15, mode="METRO", trip="S3", end=2019-05-01 02:20),
-    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 02:20, mode="WALK", trip="-", end=2019-05-01 02:29)
+    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 02:20, mode="WALK", trip="-", end=2019-05-01 02:30)
 ])",
           to_str(res.itineraries_));
     }
@@ -623,13 +810,14 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match closely for wheelchair
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=03:01, end=03:29, duration=00:29, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 03:01, mode="WALK", trip="-", end=2019-05-01 03:15),
+          R"(date=2019-05-01, start=03:00, end=03:30, duration=00:30, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 03:00, mode="WALK", trip="-", end=2019-05-01 03:15),
     (from=test_FFM_101 [track=101, scheduled_track=101, level=-3], to=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], start=2019-05-01 03:15, mode="METRO", trip="S3", end=2019-05-01 03:20),
-    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 03:20, mode="WALK", trip="-", end=2019-05-01 03:29)
+    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 03:20, mode="WALK", trip="-", end=2019-05-01 03:30)
 ])",
           to_str(res.itineraries_));
     }
@@ -645,13 +833,14 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match closely for wheelchair
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=01:34, end=02:40, duration=01:20, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:34, mode="WALK", trip="-", end=2019-05-01 01:35),
+          R"(date=2019-05-01, start=01:34, end=02:39, duration=01:05, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:34, mode="WALK", trip="-", end=2019-05-01 01:35),
     (from=test_DA_10 [track=10, scheduled_track=10, level=-1, alerts=["Yeah"]], to=test_FFM_12 [track=12, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:55, alerts=["Hello"]),
-    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:30, mode="WALK", trip="-", end=2019-05-01 02:40)
+    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:30, mode="WALK", trip="-", end=2019-05-01 02:39)
 ])",
           to_str(res.itineraries_));
     }
@@ -661,19 +850,20 @@ TEST(motis, routing) {
       auto const res = routing(
           "?fromPlace=49.87336,8.62926"
           "&toPlace=50.106420,8.660708,-3"
-          "&time=2019-05-01T02:55Z"
+          "&time=2019-05-01T02:57Z"
           "&arriveBy=true"
           "&preTransitModes=WALK"
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match closely for wheelchair
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=02:34, end=02:55, duration=00:21, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 02:34, mode="WALK", trip="-", end=2019-05-01 02:35),
+          R"(date=2019-05-01, start=02:34, end=02:57, duration=00:23, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 02:34, mode="WALK", trip="-", end=2019-05-01 02:35),
     (from=test_DA_10 [track=10, scheduled_track=10, level=-1], to=test_FFM_10 [track=10, scheduled_track=10, level=0], start=2019-05-01 02:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 02:45),
-    (from=test_FFM_10 [track=10, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:45, mode="WALK", trip="-", end=2019-05-01 02:55)
+    (from=test_FFM_10 [track=10, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:45, mode="WALK", trip="-", end=2019-05-01 02:57)
 ])",
           to_str(res.itineraries_));
     }
@@ -689,13 +879,14 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match 'toPlace' closely
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=01:34, end=02:40, duration=01:10, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:34, mode="WALK", trip="-", end=2019-05-01 01:35),
+          R"(date=2019-05-01, start=01:34, end=02:39, duration=01:05, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:34, mode="WALK", trip="-", end=2019-05-01 01:35),
     (from=test_DA_10 [track=10, scheduled_track=10, level=-1, alerts=["Yeah"]], to=test_FFM_12 [track=12, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:55, alerts=["Hello"]),
-    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:30, mode="WALK", trip="-", end=2019-05-01 02:40)
+    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:30, mode="WALK", trip="-", end=2019-05-01 02:39)
 ])",
           to_str(res.itineraries_));
     }
@@ -711,13 +902,14 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match closely for wheelchair
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
-          R"(date=2019-05-01, start=02:34, end=02:55, duration=01:15, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 02:34, mode="WALK", trip="-", end=2019-05-01 02:35),
+          R"(date=2019-05-01, start=02:34, end=02:57, duration=00:23, transfers=0, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 02:34, mode="WALK", trip="-", end=2019-05-01 02:35),
     (from=test_DA_10 [track=10, scheduled_track=10, level=-1], to=test_FFM_10 [track=10, scheduled_track=10, level=0], start=2019-05-01 02:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 02:45),
-    (from=test_FFM_10 [track=10, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:45, mode="WALK", trip="-", end=2019-05-01 02:55)
+    (from=test_FFM_10 [track=10, scheduled_track=10, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:45, mode="WALK", trip="-", end=2019-05-01 02:57)
 ])",
           to_str(res.itineraries_));
     }
@@ -733,17 +925,16 @@ TEST(motis, routing) {
           "&timetableView=false"
           "&pedestrianProfile=WHEELCHAIR"
           "&maxMatchingDistance=8"  // Should match places closely
-          "&useRoutedTransfers=true");
+          "&useRoutedTransfers=true"
+          "&numLegAlternatives=3");
 
       EXPECT_EQ(
           R"(date=2019-05-01, start=01:15, end=01:32, duration=00:17, transfers=0, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 01:15, mode="WALK", trip="-", end=2019-05-01 01:32)
+    (from=- [track=-, scheduled_track=-, level=-], to=- [track=-, scheduled_track=-, level=-3], start=2019-05-01 01:15, mode="WALK", trip="-", end=2019-05-01 01:32)
 ])",
           to_str(res.direct_));
     }
   }
-
-
 
   // Route with wheelchair.
   {
@@ -753,15 +944,16 @@ TEST(motis, routing) {
         "&time=2019-05-01T01:25Z"
         "&pedestrianProfile=WHEELCHAIR"
         "&useRoutedTransfers=true"
-        "&timetableView=false");
+        "&timetableView=false"
+        "&numLegAlternatives=3");
 
     EXPECT_EQ(
-        R"(date=2019-05-01, start=01:29, end=02:29, duration=01:04, transfers=1, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:29, mode="WALK", trip="-", end=2019-05-01 01:35),
+        R"(date=2019-05-01, start=01:28, end=02:29, duration=01:01, transfers=1, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:28, mode="WALK", trip="-", end=2019-05-01 01:35),
     (from=test_DA_10 [track=10, scheduled_track=10, level=-1, alerts=["Yeah"]], to=test_FFM_12 [track=12, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:55, alerts=["Hello"]),
-    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 01:55, mode="WALK", trip="-", end=2019-05-01 02:02),
+    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=test_FFM_101 [track=101, scheduled_track=101, level=-3], start=2019-05-01 01:55, mode="WALK", trip="-", end=2019-05-01 02:01),
     (from=test_FFM_101 [track=101, scheduled_track=101, level=-3], to=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], start=2019-05-01 02:15, mode="METRO", trip="S3", end=2019-05-01 02:20),
-    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 02:20, mode="WALK", trip="-", end=2019-05-01 02:29)
+    (from=test_FFM_HAUPT_S [track=-, scheduled_track=-, level=-3], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 02:20, mode="WALK", trip="-", end=2019-05-01 02:29)
 ])",
         to_str(res.itineraries_));
   }
@@ -773,17 +965,241 @@ TEST(motis, routing) {
         "&toPlace=50.11347,8.67664"
         "&time=2019-05-01T01:25Z"
         "&useRoutedTransfers=true"
-        "&timetableView=false");
+        "&timetableView=false"
+        "&numLegAlternatives=3");
 
     EXPECT_EQ(
-        R"(date=2019-05-01, start=01:25, end=02:15, duration=00:50, transfers=1, legs=[
-    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:25, mode="WALK", trip="-", end=2019-05-01 01:29),
+        R"(date=2019-05-01, start=01:31, end=02:15, duration=00:44, transfers=1, legs=[
+    (from=- [track=-, scheduled_track=-, level=-], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:31, mode="WALK", trip="-", end=2019-05-01 01:35),
     (from=test_DA_10 [track=10, scheduled_track=10, level=-1, alerts=["Yeah"]], to=test_FFM_12 [track=12, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:55, alerts=["Hello"]),
-    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], start=2019-05-01 01:55, mode="WALK", trip="-", end=2019-05-01 02:00),
+    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], start=2019-05-01 01:55, mode="WALK", trip="-", end=2019-05-01 01:59),
+    (from=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], to=test_FFM_HAUPT_U [track=-, scheduled_track=-, level=-4], start=2019-05-01 02:05, mode="SUBWAY", trip="U4", end=2019-05-01 02:10),
+    (from=test_FFM_HAUPT_U [track=-, scheduled_track=-, level=-4], to=- [track=-, scheduled_track=-, level=-], start=2019-05-01 02:10, mode="WALK", trip="-", end=2019-05-01 02:15)
+])",
+        to_str(res.itineraries_));
+    // Same test but using an older endpoint version (v1 - v5)
+    // This test must always set a level
+    {
+      auto const res2 = routing(
+          "/api/v5/plan"  // Specify any older endpoint v1 to v5
+          "?fromPlace=49.87263,8.63127"
+          "&toPlace=50.11347,8.67664"
+          "&time=2019-05-01T01:25Z"
+          "&useRoutedTransfers=true"
+          "&timetableView=false");
+
+      EXPECT_EQ(
+          R"(date=2019-05-01, start=01:31, end=02:15, duration=00:44, transfers=1, legs=[
+    (from=- [track=-, scheduled_track=-, level=0], to=test_DA_10 [track=10, scheduled_track=10, level=-1], start=2019-05-01 01:31, mode="WALK", trip="-", end=2019-05-01 01:35),
+    (from=test_DA_10 [track=10, scheduled_track=10, level=-1, alerts=["Yeah"]], to=test_FFM_12 [track=12, scheduled_track=10, level=0], start=2019-05-01 01:35, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 01:55, alerts=["Hello"]),
+    (from=test_FFM_12 [track=12, scheduled_track=10, level=0], to=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], start=2019-05-01 01:55, mode="WALK", trip="-", end=2019-05-01 01:59),
     (from=test_de:6412:10:6:1 [track=U4, scheduled_track=U4, level=-2], to=test_FFM_HAUPT_U [track=-, scheduled_track=-, level=-4], start=2019-05-01 02:05, mode="SUBWAY", trip="U4", end=2019-05-01 02:10),
     (from=test_FFM_HAUPT_U [track=-, scheduled_track=-, level=-4], to=- [track=-, scheduled_track=-, level=0], start=2019-05-01 02:10, mode="WALK", trip="-", end=2019-05-01 02:15)
+])",
+          to_str(res2.itineraries_));
+    }
+  }
+
+  // Route using radius: finds stops within 5km radius from coordinates,
+  // no preTransitModes / OSM street routing needed.
+  {
+    // fromPlace is ~2km from DA_10, toPlace is ~2km from FFM_10.
+    auto const res = routing(
+        "?fromPlace=49.89100,8.62900"
+        "&toPlace=50.08800,8.66100"
+        "&time=2019-05-01T01:30Z"
+        "&radius=5000"
+        "&timetableView=false"
+        "&numLegAlternatives=3");
+    ASSERT_FALSE(res.itineraries_.empty());
+    auto const& j = res.itineraries_.front();
+    EXPECT_TRUE(utl::any_of(j.legs_, [](auto const& l) {
+      return l.routeShortName_.has_value() && *l.routeShortName_ == "ICE";
+    }));
+    // The stops are not free anymore: reaching them costs the crow-fly
+    // distance walked at kWalkSpeed.
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.front().mode_);
+    EXPECT_EQ(api::ModeEnum::WALK, j.legs_.back().mode_);
+    EXPECT_GT(j.legs_.front().duration_, 0);
+    EXPECT_GT(j.legs_.back().duration_, 0);
+  }
+
+  // Route using radius on origin coordinate, station ID as destination.
+  {
+    // fromPlace is ~2km from DA_10, toPlace is the FFM_10 stop directly.
+    auto const res = routing(
+        "?fromPlace=49.89100,8.62900"
+        "&toPlace=test_FFM_10"
+        "&time=2019-05-01T01:30Z"
+        "&radius=5000"
+        "&timetableView=false"
+        "&numLegAlternatives=3");
+    ASSERT_FALSE(res.itineraries_.empty());
+    EXPECT_TRUE(utl::any_of(res.itineraries_.front().legs_, [](auto const& l) {
+      return l.routeShortName_.has_value() && *l.routeShortName_ == "ICE";
+    }));
+  }
+
+  // Baseline test to make sure test results change with wheelchair routing
+  {
+    auto const res = routing(
+        "?fromPlace=test_WCH_A"
+        "&toPlace=test_WCH_C"
+        "&time=2019-05-01T7:00Z"
+        "&arriveBy=false"
+        "&preTransitModes=WALK"
+        "&timetableView=false"
+        "&useRoutedTransfers=true");
+
+    EXPECT_EQ(
+        R"(date=2019-05-01, start=08:00, end=09:00, duration=01:00, transfers=0, legs=[
+    (from=test_WCH_A [track=-, scheduled_track=-, level=0], to=test_WCH_C [track=-, scheduled_track=-, level=0], start=2019-05-01 08:00, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 09:00)
 ])",
         to_str(res.itineraries_));
   }
 
+  // Use only vehicles that are wheelchair accessible, and only suggest
+  // transfers at stops that allow wheelchair boarding
+  //
+  // Inaccessible ICE from A -> C is the fastest
+  // Accessible ICEs via B1 are slowest but only uses accessible transfer stops
+  // Accessible ICEs via B2 are in between, but use inaccesisible transfer stops
+  //
+  // Expected result: Accessible ICE via B1
+  {
+    auto const res = routing(
+        "?fromPlace=test_WCH_A"
+        "&toPlace=test_WCH_C"
+        "&time=2019-05-01T7:00Z"
+        "&arriveBy=false"
+        "&preTransitModes=WALK"
+        "&timetableView=false"
+        "&pedestrianProfile=WHEELCHAIR"
+        "&useRoutedTransfers=true");
+
+    EXPECT_EQ(
+        R"(date=2019-05-01, start=08:00, end=11:00, duration=03:00, transfers=1, legs=[
+    (from=test_WCH_A [track=-, scheduled_track=-, level=0], to=test_WCH_B1 [track=-, scheduled_track=-, level=0], start=2019-05-01 08:00, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 09:00),
+    (from=test_WCH_B1 [track=-, scheduled_track=-, level=0], to=test_WCH_B1 [track=-, scheduled_track=-, level=0], start=2019-05-01 09:00, mode="WALK", trip="-", end=2019-05-01 09:00),
+    (from=test_WCH_B1 [track=-, scheduled_track=-, level=0], to=test_WCH_C [track=-, scheduled_track=-, level=0], start=2019-05-01 10:00, mode="HIGHSPEED_RAIL", trip="ICE", end=2019-05-01 11:00)
+])",
+        to_str(res.itineraries_));
+  }
+}
+
+// Offsets are produced by a one-to-many search; the leg for such an offset is
+// reconstructed from that retained search. Without it the leg is routed again
+// with a budget derived from the offset duration, which does not cover the
+// routing penalties the cost carries - so the same leg comes back cancelled.
+TEST(motis, rental_offset_reconstructs_from_retained_search) {
+  auto const path = std::filesystem::path{"test/data_rental_offset_retained"};
+  auto ec = std::error_code{};
+  std::filesystem::remove_all(path, ec);
+  auto const c = config{
+      .osm_ = {"test/resources/test_case.osm.pbf"},
+      .timetable_ = config::timetable{.first_day_ = "2019-05-01",
+                                      .num_days_ = 2,
+                                      .extend_missing_footpaths_ = false,
+                                      .datasets_ = {{"test", {.path_ = R"(
+# agency.txt
+agency_id,agency_name,agency_url,agency_timezone
+DB,DB,https://example.com,Europe/Berlin
+# stops.txt
+stop_id,stop_name,stop_lat,stop_lon
+A,A,49.875258,8.62775
+B,B,49.87249,8.628198
+# routes.txt
+route_id,agency_id,route_short_name,route_type
+R,DB,R,3
+# trips.txt
+route_id,service_id,trip_id
+R,S,T
+# stop_times.txt
+trip_id,arrival_time,departure_time,stop_id,stop_sequence
+T,12:00:00,12:00:00,A,1
+T,12:01:00,12:01:00,B,2
+# calendar_dates.txt
+service_id,date,exception_type
+S,20190501,1
+)"}}}},
+      .gbfs_ = {{.feeds_ = {{"CAB", {.url_ = "./test/resources/gbfs"}}}}},
+      .street_routing_ = true};
+  import(c, path);
+  auto d = data{path, c};
+  auto ioc = boost::asio::io_context{};
+  boost::asio::co_spawn(
+      ioc,
+      [&]() -> boost::asio::awaitable<void> {
+        co_await gbfs::update(c, *d.w_, *d.l_, d.gbfs_, d.metrics_.get());
+      },
+      boost::asio::detached);
+  ioc.run();
+  auto const routing = utl::init_from<ep::routing>(d).value();
+  auto gbfs_rd = gbfs::gbfs_routing_data{d.w_.get(), d.l_.get(), d.gbfs_};
+  auto blocked_mem = osr::bitvec<osr::node_idx_t>{d.w_->n_nodes()};
+
+  for (auto const dir : {osr::direction::kForward, osr::direction::kBackward}) {
+    SCOPED_TRACE(osr::to_str(dir));
+    auto const forward = dir == osr::direction::kForward;
+    auto const pos = forward
+                         ? osr::location{{49.875258, 8.62775}, osr::kNoLevel}
+                         : osr::location{{49.87249, 8.628198}, osr::kNoLevel};
+    auto const stop =
+        d.tags_->get_location(*d.tt_, forward ? "test_B" : "test_A");
+    auto const stop_pos = get_location(d.tt_.get(), d.w_.get(), d.pl_.get(),
+                                       d.matches_.get(), tt_location{stop});
+
+    auto otm = one_to_many_searches{};
+    auto stats = ep::stats_map_t{};
+    auto const offsets = routing.get_offsets(
+        d.rt_->rtt_.get(), pos, dir, {api::ModeEnum::RENTAL},
+        rental_options{.ignore_return_constraints_ = true}, {},
+        api::PedestrianProfileEnum::FOOT, api::ElevationCostsEnum::NONE, 3600s,
+        250.0, gbfs_rd, stats, &otm[n::special_station::kStart]);
+    auto const offset =
+        std::find_if(begin(offsets), end(offsets), [&](auto const& o) {
+          return o.target() == stop &&
+                 to_mode(o.mode()) == api::ModeEnum::RENTAL;
+        });
+    ASSERT_NE(end(offsets), offset);
+
+    auto const precomputed = one_to_many_view{&otm}.find(
+        n::get_special_station(n::special_station::kStart), stop,
+        offset->mode(), offset->target());
+    ASSERT_NE(nullptr, precomputed.state_);
+
+    auto const from = forward ? pos : stop_pos;
+    auto const to = forward ? stop_pos : pos;
+    auto const out = gbfs::gbfs_output{
+        *d.w_, gbfs_rd, gbfs_rd.get_products_ref(offset->mode().payload_),
+        true};
+    auto const start = n::unixtime_t{date::sys_days{2019_y / May / 1}};
+    // A budget this small cannot produce the leg on its own.
+    auto const reconstruct = [&](precomputed_route const& p) {
+      auto cache = street_routing_cache_t{};
+      return street_routing(*d.w_, *d.l_, nullptr, nullptr, {},
+                            to_place(from, "", {}), to_place(to, "", {}), out,
+                            start, start + offset->duration(), 250.0, {}, cache,
+                            blocked_mem, 6U, true, 1s, p);
+    };
+
+    auto const restored = reconstruct(precomputed);
+    ASSERT_FALSE(restored.legs_.empty());
+    auto has_rental = false;
+    for (auto const& leg : restored.legs_) {
+      EXPECT_FALSE(leg.cancelled_.value_or(false));
+      EXPECT_FALSE(leg.legGeometry_.points_.empty());
+      if (leg.mode_ == api::ModeEnum::RENTAL) {
+        ASSERT_TRUE(leg.rental_.has_value());
+        EXPECT_EQ("CAB", leg.rental_->providerId_);
+        has_rental = true;
+      }
+    }
+    EXPECT_TRUE(has_rental);
+
+    auto const routed_again = reconstruct({});
+    ASSERT_EQ(1U, routed_again.legs_.size());
+    EXPECT_TRUE(routed_again.legs_.front().cancelled_.value_or(false));
+    EXPECT_TRUE(routed_again.legs_.front().legGeometry_.points_.empty());
+  }
 }

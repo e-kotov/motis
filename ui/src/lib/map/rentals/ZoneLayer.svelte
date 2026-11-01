@@ -1,5 +1,5 @@
 <script lang="ts">
-	import maplibregl from 'maplibre-gl';
+	import type * as maplibregl from 'maplibre-gl';
 	import type { PointLike } from 'maplibre-gl';
 	import { getContext, onDestroy } from 'svelte';
 
@@ -23,7 +23,7 @@
 	let layerInstance = $state<ZoneFillLayer | null>(null);
 	let pendingRetryHandler: ((event?: unknown) => void) | null = null;
 	let currentFeatures: RentalZoneFeature[] | null = null;
-	let lastOpacity = opacity;
+	let lastOpacity: number | undefined;
 
 	const ensureLayerInstance = () => {
 		if (!layerInstance) {

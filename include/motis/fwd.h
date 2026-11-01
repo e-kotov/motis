@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace adr {
 struct formatter;
 struct reverse;
@@ -24,6 +26,7 @@ namespace nigiri {
 struct timetable;
 struct rt_timetable;
 struct shapes_storage;
+enum class rt_data_state : std::uint8_t;
 
 namespace rt {
 struct run;
@@ -37,6 +40,11 @@ struct offset;
 namespace tb {
 struct tb_data;
 }
+
+namespace gpu {
+struct gpu_timetable;
+struct gpu_raptor_state;
+}  // namespace gpu
 
 }  // namespace routing
 

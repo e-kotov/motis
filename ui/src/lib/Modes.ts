@@ -4,6 +4,7 @@ export const prePostDirectModes = [
 	'WALK',
 	'BIKE',
 	'CAR',
+	'HGV',
 	'FLEX',
 	'CAR_DROPOFF',
 	'CAR_PARKING',
@@ -13,7 +14,10 @@ export const prePostDirectModes = [
 	'RENTAL_MOPED',
 	'RENTAL_SCOOTER_STANDING',
 	'RENTAL_SCOOTER_SEATED',
-	'RENTAL_OTHER'
+	'RENTAL_OTHER',
+	'DEBUG_BUS_ROUTE',
+	'DEBUG_RAILWAY_ROUTE',
+	'DEBUG_FERRY_ROUTE'
 ] as const;
 export type PrePostDirectMode = (typeof prePostDirectModes)[number];
 
@@ -39,13 +43,13 @@ export const prePostModesToModes = (modes: PrePostDirectMode[]): Mode[] => {
 	return [...nonRentalModes, ...rentalMode].map((mode) => mode as Mode);
 };
 
-export const possibleTransitModes = [
+export const possibleTransitModes: Mode[] = [
 	'AIRPLANE',
 	'HIGHSPEED_RAIL',
 	'LONG_DISTANCE',
 	'NIGHT_RAIL',
 	'COACH',
-	'REGIONAL_FAST_RAIL',
+	'RIDE_SHARING',
 	'REGIONAL_RAIL',
 	'SUBURBAN',
 	'SUBWAY',

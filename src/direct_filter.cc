@@ -5,6 +5,8 @@
 
 #include "nigiri/types.h"
 
+#include "motis/journey_to_response.h"
+
 namespace motis {
 
 using namespace std::chrono_literals;
@@ -12,10 +14,15 @@ namespace n = nigiri;
 
 void direct_filter(std::vector<api::Itinerary> const& direct,
                    std::vector<n::routing::journey>& journeys) {
-  auto const get_direct_duration = [&](auto const transport_mode_id) {
-    auto const m = static_cast<api::ModeEnum>(transport_mode_id);
-    auto const i = utl::find_if(
-        direct, [&](auto const& d) { return d.legs_.front().mode_ == m; });
+  auto const get_direct_duration = [&](transport_mode_t const mode) {
+    auto const m = to_mode(mode);
+    auto const i = utl::find_if(direct, [&](auto const& d) {
+      auto const leg_with_actual_mode =
+          d.legs_.size() > 1 && d.legs_.front().mode_ == api::ModeEnum::WALK
+              ? 1U
+              : 0U;
+      return d.legs_.at(leg_with_actual_mode).mode_ == m;
+    });
     return i != end(direct)
                ? n::duration_t{std::chrono::round<std::chrono::minutes>(
                      std::chrono::seconds{i->duration_})}
@@ -32,17 +39,15 @@ void direct_filter(std::vector<api::Itinerary> const& direct,
         [&](n::routing::offset const& o) { return std::optional{o}; });
 
     auto const longer_than_direct = [&](n::routing::offset const& o) {
-      return std::optional{o.duration_ >=
-                           get_direct_duration(o.transport_mode_id_)};
+      return std::optional{o.duration_ >= get_direct_duration(o.mode())};
     };
 
     return first_leg_offset.and_then(longer_than_direct).value_or(false) ||
            last_leg_offset.and_then(longer_than_direct).value_or(false) ||
            (first_leg_offset && last_leg_offset &&
-            first_leg_offset->transport_mode_id_ ==
-                last_leg_offset->transport_mode_id_ &&
+            first_leg_offset->mode() == last_leg_offset->mode() &&
             first_leg_offset->duration_ + last_leg_offset->duration_ >=
-                get_direct_duration(first_leg_offset->transport_mode_id_));
+                get_direct_duration(first_leg_offset->mode()));
   };
 
   utl::erase_if(journeys, not_better_than_direct);

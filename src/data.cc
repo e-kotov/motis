@@ -2,9 +2,11 @@
 
 #include <filesystem>
 #include <future>
+#include <iostream>
 
 #include "cista/io.h"
 
+#include "utl/get_or_create.h"
 #include "utl/read_file.h"
 #include "utl/verify.h"
 
@@ -19,15 +21,21 @@
 #include "osr/platforms.h"
 #include "osr/ways.h"
 
+#include "nigiri/logging.h"
 #include "nigiri/routing/tb/tb_data.h"
 #include "nigiri/rt/create_rt_timetable.h"
 #include "nigiri/rt/rt_timetable.h"
 #include "nigiri/shapes_storage.h"
 #include "nigiri/timetable.h"
 
+#if defined(NIGIRI_CUDA)
+#include "nigiri/routing/gpu/raptor.h"
+#endif
+
 #include "motis/config.h"
 #include "motis/constants.h"
 #include "motis/elevators/update_elevators.h"
+#include "motis/endpoints/initial.h"
 #include "motis/flex/flex_areas.h"
 #include "motis/hashes.h"
 #include "motis/match_platforms.h"
@@ -38,12 +46,56 @@
 #include "motis/tag_lookup.h"
 #include "motis/tiles_data.h"
 #include "motis/tt_location_rtree.h"
-#include "utl/get_or_create.h"
 
 namespace fs = std::filesystem;
 namespace n = nigiri;
 
 namespace motis {
+
+#if defined(NIGIRI_CUDA)
+gpu_search_pool::lease::lease(gpu_search_pool& p,
+                              n::routing::gpu::gpu_raptor_state& s)
+    : pool_{p}, state_{s} {}
+
+gpu_search_pool::lease::~lease() {
+  {
+    auto const l = std::scoped_lock{pool_.mutex_};
+    pool_.free_.push_back(&state_);
+  }
+  pool_.cv_.notify_one();
+}
+
+gpu_search_pool::gpu_search_pool(n::routing::gpu::gpu_timetable const& gtt,
+                                 unsigned const n) {
+  for (auto i = 0U; i != n; ++i) {
+    try {
+      states_.push_back(
+          std::make_unique<n::routing::gpu::gpu_raptor_state>(gtt));
+    } catch (std::exception const& e) {
+      if (states_.empty()) {
+        throw;
+      }
+      std::cerr << "gpu_search_pool: only " << states_.size() << "/" << n
+                << " states allocated: " << e.what() << "\n";
+      break;
+    }
+  }
+
+  for (auto& s : states_) {
+    free_.push_back(s.get());
+  }
+}
+
+gpu_search_pool::~gpu_search_pool() = default;
+
+gpu_search_pool::lease gpu_search_pool::acquire() {
+  auto l = std::unique_lock{mutex_};
+  cv_.wait(l, [&]() { return !free_.empty(); });
+  auto* s = free_.back();
+  free_.pop_back();
+  return {*this, *s};
+}
+#endif
 
 rt::rt() = default;
 
@@ -173,19 +225,34 @@ data::data(std::filesystem::path p, config const& c)
     if (c.has_elevators()) {
       street_routing.wait();
 
+      elevator_osm_mapping_ =
+          utl::visit(
+              config_.elevators_,
+              [](std::optional<config::elevators> const& x) { return x; })
+              .and_then([](auto const& x) { return x.osm_mapping_; })
+              .transform([](std::string const& x) {
+                return std::make_unique<elevator_id_osm_mapping_t>(
+                    x.starts_with("dhid,diid,osm_kind,osm_id")
+                        ? parse_elevator_id_osm_mapping(std::string_view{x})
+                        : parse_elevator_id_osm_mapping(fs::path{x}));
+              })
+              .value_or(nullptr);
       rt_->e_ = std::make_unique<motis::elevators>(
-          *w_, *elevator_nodes_, vector_map<elevator_idx_t, elevator>{});
+          *w_, elevator_osm_mapping_.get(), *elevator_nodes_,
+          vector_map<elevator_idx_t, elevator>{});
 
       if (c.get_elevators()->init_) {
         tt.wait();
         auto new_rtt = std::make_unique<n::rt_timetable>(
             n::rt::create_rt_timetable(*tt_, rt_->rtt_->base_day_));
-        rt_->e_ =
-            update_elevators(c, *this,
-                             cista::mmap{c.get_elevators()->init_->c_str(),
-                                         cista::mmap::protection::READ}
-                                 .view(),
-                             *new_rtt);
+        rt_->e_ = update_elevators(
+            c, *this,
+            c.get_elevators()->init_->starts_with("\n")
+                ? std::string_view{*c.get_elevators()->init_}
+                : cista::mmap{c.get_elevators()->init_->c_str(),
+                              cista::mmap::protection::READ}
+                      .view(),
+            *new_rtt);
         rt_->rtt_ = std::move(new_rtt);
       }
     }
@@ -234,6 +301,25 @@ data::data(std::filesystem::path p, config const& c)
                  matches_->size() == tt_->n_locations(),
              "mismatch: n_matches={}, n_locations={}", matches_->size(),
              tt_->n_locations());
+
+#if defined(NIGIRI_CUDA)
+  if (c.timetable_) {
+    gpu_tt_ = std::make_unique<n::routing::gpu::gpu_timetable>(*tt_);
+    gpu_pool_ = std::make_unique<gpu_search_pool>(
+        *gpu_tt_, c.server_ ? c.server_->gpu_states_ : 2U);
+    if (rt_->rtt_ != nullptr) {
+      try {
+        rt_->rtt_->gpu_rtt_.ptr_ =
+            n::routing::gpu::make_gpu_rtt(*tt_, *rt_->rtt_);
+        metrics_->gpu_rt_timetable_.Set(1);
+      } catch (std::exception const& e) {
+        n::log(n::log_lvl::error, "motis.data",
+               "GPU rt timetable upload failed: {}", e.what());
+        metrics_->gpu_rt_timetable_.Set(0);
+      }
+    }
+  }
+#endif
 }
 
 data::~data() = default;
@@ -268,6 +354,10 @@ void data::load_flex_areas() {
   utl::verify(tt_ && w_ && l_, "flex areas requires tt={}, w={}, l={}",
               tt_ != nullptr, w_ != nullptr, l_ != nullptr);
   flex_areas_ = std::make_unique<flex::flex_areas>(*tt_, *w_, *l_);
+}
+
+void data::init_initial(std::string_view motis_version) {
+  initial_response_ = ep::get_initial_response(*this, motis_version);
 }
 
 void data::init_rtt(date::sys_days const d) {
@@ -368,6 +458,9 @@ void data::load_auser_updater(std::string_view tag,
   };
 
   for (auto const& rt : *d.rt_) {
+    if (rt.protocol_ == config::timetable::dataset::rt::protocol::gtfsrt) {
+      continue;
+    }
     auser_->try_emplace(rt.url_, *tt_, tags_->get_src(tag),
                         convert(rt.protocol_));
   }
