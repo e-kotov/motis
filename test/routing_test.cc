@@ -615,6 +615,137 @@ TEST(motis, routing) {
               fallback.itineraries_.front().endTime_);
   }
 
+  // Preserve the existing TAD endpoint contracts across the upstream merge.
+  // Executed BEFORE real-time data is injected into the environment.
+  {
+    auto const base_query = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T01:25Z&numItineraries=1";
+
+    // 1. arriveBy is now SUPPORTED by TAD (Phase 5)
+    {
+      auto const base = "?fromPlace=test_DA&toPlace=test_FFM&time=2019-05-01T02:00Z&arriveBy=true&numItineraries=1";
+      auto const raptor_res = routing(base + std::string("&algorithm=RAPTOR"));
+      auto const tad_res = routing(base + std::string("&algorithm=TAD"));
+      EXPECT_GT(raptor_res.itineraries_.size(), 0U);
+      EXPECT_GT(tad_res.itineraries_.size(), 0U);
+      
+      bool found = false;
+      if (!tad_res.itineraries_.empty()) {
+        for (auto const& it : raptor_res.itineraries_) {
+          if (it.startTime_ == tad_res.itineraries_.front().startTime_ &&
+              it.endTime_ == tad_res.itineraries_.front().endTime_ &&
+              it.legs_.size() == tad_res.itineraries_.front().legs_.size()) {
+            bool legs_match = true;
+            for (size_t i = 0; i < it.legs_.size(); ++i) {
+              if (it.legs_[i].mode_ != tad_res.itineraries_.front().legs_[i].mode_ ||
+                  it.legs_[i].tripId_ != tad_res.itineraries_.front().legs_[i].tripId_ ||
+                  it.legs_[i].from_.name_ != tad_res.itineraries_.front().legs_[i].from_.name_ ||
+                  it.legs_[i].to_.name_ != tad_res.itineraries_.front().legs_[i].to_.name_) {
+                legs_match = false;
+                break;
+              }
+            }
+            if (legs_match) {
+              found = true;
+              break;
+            }
+          }
+        }
+      }
+      EXPECT_TRUE(found) << "TAD itinerary not found in RAPTOR's Pareto set. TAD string: " << to_str(tad_res.itineraries_);
+      
+      // arriveBy test: verify that the arrival time respects the query constraint
+      // 2019-05-01T02:00Z -> 1556676000
+      if (!tad_res.itineraries_.empty()) {
+        EXPECT_LE(static_cast<std::chrono::sys_seconds>(tad_res.itineraries_.front().endTime_).time_since_epoch().count(), 1556676000);
+      }
+    }
+
+    // 2. Coordinate / time-dependent offsets are now SUPPORTED by TAD (Phase 2)
+    {
+      auto const base = "?fromPlace=49.87526849014631,8.62771903392948&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&numItineraries=1";
+      auto const raptor_res = routing(base + std::string("&algorithm=RAPTOR"));
+      auto const tad_res = routing(base + std::string("&algorithm=TAD"));
+      
+      EXPECT_GT(raptor_res.itineraries_.size(), 0U);
+      EXPECT_GT(tad_res.itineraries_.size(), 0U);
+      // Compare Earliest Arrival Time (oracle test)
+      EXPECT_EQ(raptor_res.itineraries_.front().endTime_, tad_res.itineraries_.front().endTime_);
+    }
+    
+    // 3. Via routing is now SUPPORTED by TAD (Phase 6)
+    {
+      auto const via_query = "?fromPlace=test_DA&toPlace=test_FFM_HAUPT&time=2019-05-01T01:25Z&via=test_FFM";
+      auto const raptor_via = routing(via_query + std::string("&algorithm=RAPTOR"));
+      auto const tad_via = routing(via_query + std::string("&algorithm=TAD"));
+      EXPECT_GT(raptor_via.itineraries_.size(), 0U);
+      EXPECT_GT(tad_via.itineraries_.size(), 0U);
+      EXPECT_EQ(raptor_via.itineraries_.front().endTime_, tad_via.itineraries_.front().endTime_);
+
+      bool via_stop_found = false;
+      auto const& legs = tad_via.itineraries_.front().legs_;
+      ASSERT_GE(legs.size(), 2U);
+      auto const is_via_stop = [](std::string_view id) {
+        return id.starts_with("test_FFM") && !id.starts_with("test_FFM_HAUPT");
+      };
+      for (std::size_t i = 0; i + 1 < legs.size(); ++i) {
+        auto const to_id = legs[i].to_.stopId_.value_or("");
+        auto const from_id = legs[i + 1].from_.stopId_.value_or("");
+        if (is_via_stop(to_id) && is_via_stop(from_id)) {
+          via_stop_found = true;
+          break;
+        }
+      }
+      EXPECT_TRUE(via_stop_found);
+    }
+
+    // 4-7. Phase 3 Constraints are now SUPPORTED by TAD (Phase 3)
+    {
+      // Baseline without constraints
+      auto const t_base = routing(base_query + std::string("&algorithm=TAD"));
+      EXPECT_GT(t_base.itineraries_.size(), 0U);
+
+      // 4. Vehicle transport (e.g. bike/car)
+      auto const t_car = routing("?fromPlace=49.87526849014631,8.62771903392948&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&numItineraries=1&preTransitModes=CAR&algorithm=TAD");
+      EXPECT_GT(t_car.itineraries_.size(), 0U);
+      // Property test: The first leg should be using a CAR.
+      EXPECT_EQ(t_car.itineraries_.front().legs_.front().mode_, motis::api::ModeEnum::CAR);
+      
+      // 5. Filtered classes (Adversarial test: allow only SUBWAY, which doesn't exist between DA and FFM directly)
+      auto const t_subway = routing(base_query + std::string("&transitModes=SUBWAY&algorithm=TAD"));
+      EXPECT_EQ(t_subway.itineraries_.size(), 0U); // Unreachable with only SUBWAY
+
+      auto const t_class = routing(base_query + std::string("&transitModes=HIGHSPEED_RAIL&algorithm=TAD"));
+      EXPECT_GT(t_class.itineraries_.size(), 0U);
+      for (const auto& leg : t_class.itineraries_.front().legs_) {
+        if (leg.mode_ != motis::api::ModeEnum::WALK) {
+          EXPECT_EQ(leg.mode_, motis::api::ModeEnum::HIGHSPEED_RAIL);
+        }
+      }
+      
+      // 6. Non-default pedestrian profile (Wheelchair)
+      // Adversarial test: route requiring wheelchair should fail or take longer if inaccessible.
+      auto const wc_query = "?fromPlace=49.87263,8.63127&toPlace=50.11347,8.67664&time=2019-05-01T01:25Z&useRoutedTransfers=true&timetableView=false";
+      auto const t_prof_base = routing(wc_query + std::string("&algorithm=TAD"));
+      auto const t_prof_wc = routing(wc_query + std::string("&pedestrianProfile=WHEELCHAIR&algorithm=TAD"));
+      auto const r_prof_wc = routing(wc_query + std::string("&pedestrianProfile=WHEELCHAIR&algorithm=RAPTOR"));
+      
+      EXPECT_GT(t_prof_base.itineraries_.size(), 0U);
+      EXPECT_GT(t_prof_wc.itineraries_.size(), 0U);
+      EXPECT_GT(r_prof_wc.itineraries_.size(), 0U);
+      
+      // Wheelchair profile takes a longer/different route than base profile
+      EXPECT_NE(t_prof_base.itineraries_.front().endTime_, t_prof_wc.itineraries_.front().endTime_);
+      // But TAD matches RAPTOR's arrival time for wheelchair
+      EXPECT_EQ(r_prof_wc.itineraries_.front().endTime_, t_prof_wc.itineraries_.front().endTime_);
+      
+      // 7. Custom transfer time settings
+      auto const t_trans = routing(base_query + std::string("&transferPenalty=60&algorithm=TAD"));
+      EXPECT_GT(t_trans.itineraries_.size(), 0U);
+      // Property test: The route should still be valid and arrive no later than the base without penalty (since 0 transfers)
+      EXPECT_EQ(t_trans.itineraries_.front().endTime_, t_base.itineraries_.front().endTime_);
+    }
+  }
+
   auto const stats = n::rt::gtfsrt_update_msg(
       *d.tt_, *d.rt_->rtt_, n::source_idx_t{0}, "test",
       test::to_feed_msg(
