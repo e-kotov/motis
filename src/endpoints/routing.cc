@@ -1167,6 +1167,12 @@ api::plan_response routing::route(api::plan_params const& query,
     // effective until TAD implements it, and expose the actual engine in stats.
     if (algorithm == api::algorithmEnum::TAD &&
         (q.no_compulsory_reservation_ || q.prf_idx_ == n::kWheelchairProfile ||
+         (query.arriveBy_ &&
+          (q.start_match_mode_ == n::routing::location_match_mode::kIntermodal ||
+           q.dest_match_mode_ == n::routing::location_match_mode::kIntermodal ||
+           !q.td_start_.empty() || !q.td_dest_.empty() || !q.via_stops_.empty() ||
+           std::any_of(q.start_.begin(), q.start_.end(), [](auto const& o) { return o.duration() != 0min; }) ||
+           std::any_of(q.destination_.begin(), q.destination_.end(), [](auto const& o) { return o.duration() != 0min; }))) ||
          (rtt != nullptr && rtt->n_rt_transports() != 0U))) {
       algorithm = api::algorithmEnum::RAPTOR;
     }
