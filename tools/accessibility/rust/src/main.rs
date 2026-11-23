@@ -1,4 +1,5 @@
 mod compare;
+mod export_oracle;
 mod geo;
 mod motis_batch;
 mod oracle;
@@ -304,6 +305,8 @@ enum Cmd {
     },
     /// Independent time-expanded connection-scan oracle from GTFS (see oracle.rs).
     Oracle(oracle::OracleArgs),
+    /// Reference round-based station kernel on an `export-tt` directory (see export_oracle.rs).
+    ExportOracle(export_oracle::ExportOracleArgs),
 }
 
 fn sha256_file(p: &PathBuf) -> Result<String> {
@@ -533,6 +536,7 @@ fn main() -> Result<()> {
             println!("records={} first_origins={:?} reachable_per_departure={:?} sha256={}", n, &origins[..origins.len().min(10)], reach, sha256_file(&stream)?);
         }
         Cmd::Oracle(a) => oracle::run(a)?,
+        Cmd::ExportOracle(a) => export_oracle::run(a)?,
     }
     Ok(())
 }
