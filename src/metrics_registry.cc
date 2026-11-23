@@ -30,27 +30,31 @@ metrics_registry::metrics_registry(
                                .Help("CAR destination lists reused")
                                .Register(registry_)
                                .Add({})},
-      car_snap_cache_misses_{prometheus::BuildCounter()
-                                 .Name("motis_car_snap_cache_misses_total")
-                                 .Help("CAR destination lists prepared on a cache miss")
-                                 .Register(registry_)
-                                 .Add({})},
-      car_snap_cache_coordinates_{prometheus::BuildCounter()
-                                      .Name("motis_car_snap_cache_coordinates_total")
-                                      .Help("CAR destination coordinates matched on cache misses")
-                                      .Register(registry_)
-                                      .Add({})},
+      car_snap_cache_misses_{
+          prometheus::BuildCounter()
+              .Name("motis_car_snap_cache_misses_total")
+              .Help("CAR destination lists prepared on a cache miss")
+              .Register(registry_)
+              .Add({})},
+      car_snap_cache_coordinates_{
+          prometheus::BuildCounter()
+              .Name("motis_car_snap_cache_coordinates_total")
+              .Help("CAR destination coordinates matched on cache misses")
+              .Register(registry_)
+              .Add({})},
       car_snap_cache_preparation_seconds_{
           prometheus::BuildCounter()
               .Name("motis_car_snap_cache_preparation_seconds_total")
-              .Help("Sum of elapsed CAR destination preparation time on cache misses")
+              .Help("Sum of elapsed CAR destination preparation time on cache "
+                    "misses")
               .Register(registry_)
               .Add({})},
-      car_snap_cache_bytes_{prometheus::BuildGauge()
-                                .Name("motis_car_snap_cache_bytes")
-                                .Help("Retained bytes of prepared CAR destination lists")
-                                .Register(registry_)
-                                .Add({})},
+      car_snap_cache_bytes_{
+          prometheus::BuildGauge()
+              .Name("motis_car_snap_cache_bytes")
+              .Help("Retained bytes of prepared CAR destination lists")
+              .Register(registry_)
+              .Add({})},
       routing_journeys_found_{prometheus::BuildCounter()
                                   .Name("motis_routing_journeys_found_total")
                                   .Help("Number of journey results")
