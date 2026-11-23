@@ -1,7 +1,5 @@
 #include "motis/endpoints/one_to_many.h"
 
-#include "motis/endpoints/car_destination_match_cache.h"
-
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -21,6 +19,7 @@
 #include "motis/endpoints/one_to_many_post.h"
 #include "motis/endpoints/routing.h"
 #include "motis/gbfs/routing_data.h"
+#include "motis/osr/car_destination_match_cache.h"
 #include "motis/osr/mode_to_profile.h"
 #include "motis/timetable/modes_to_clasz_mask.h"
 #include "motis/timetable/transfer_time_settings.h"
@@ -88,15 +87,16 @@ api::oneToMany_response one_to_many_direct(
       max_duration >= std::chrono::seconds{0} &&
       max_duration < osr::kMaxDuration &&
       car_destination_matches->can_prepare(many, max_matching_distance)) {
+    auto const& car_parameters = std::get<osr::car::parameters>(pp);
     auto root = osr::match_result{};
-    l.match<osr::car>(std::get<osr::car::parameters>(pp), one, false, dir,
-                      max_matching_distance, nullptr, root);
+    l.match<osr::car>(car_parameters, one, false, dir, max_matching_distance,
+                      nullptr, root);
     auto const from_match = root[osr::match_idx_t{0U}];
     if (from_match.empty()) {
       return api::oneToMany_response(many.size());
     }
-    auto const prepared =
-        car_destination_matches->get(many, dir, max_matching_distance);
+    auto const prepared = car_destination_matches->get(
+        car_parameters, many, dir, max_matching_distance);
     auto const state = osr::route_one_to_many(
         pp, w, l, profile, one, many, from_match, *prepared, max_duration, dir,
         nullptr, nullptr, elevations_, reconstruct);

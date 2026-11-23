@@ -1,7 +1,5 @@
 #include "motis/data.h"
 
-#include "motis/endpoints/car_destination_match_cache.h"
-
 #include <filesystem>
 #include <future>
 #include <iostream>
@@ -44,6 +42,7 @@
 #include "motis/match_platforms.h"
 #include "motis/metrics_registry.h"
 #include "motis/odm/bounds.h"
+#include "motis/osr/car_destination_match_cache.h"
 #include "motis/point_rtree.h"
 #include "motis/railviz.h"
 #include "motis/rt_update.h"
@@ -331,8 +330,13 @@ void data::load_osr() {
   w_ = std::make_unique<osr::ways>(osr_path, cista::mmap::protection::READ);
   l_ = std::make_unique<osr::lookup>(*w_, osr_path,
                                      cista::mmap::protection::READ);
-  car_destination_matches_ = std::make_unique<car_destination_match_cache>(
-      *l_, config_.get_limits().onetomany_car_match_cache_max_bytes_, *metrics_);
+  auto const car_match_cache_budget =
+      config_.get_limits().onetomany_car_match_cache_max_bytes_;
+  car_destination_matches_ =
+      car_match_cache_budget == 0U
+          ? nullptr
+          : std::make_unique<car_destination_match_cache>(
+                *l_, car_match_cache_budget, *metrics_);
   if (config_.get_street_routing()->elevation_data_dir_.has_value()) {
     elevations_ = osr::elevation_storage::try_open(osr_path);
   }

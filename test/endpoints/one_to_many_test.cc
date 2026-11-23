@@ -6,6 +6,7 @@
 
 #include <chrono>
 #include <future>
+#include <memory>
 #include <optional>
 #include <vector>
 
@@ -16,10 +17,10 @@
 #include "motis-api/motis-api.h"
 
 #include "motis/config.h"
-#include "motis/endpoints/car_destination_match_cache.h"
 #include "motis/endpoints/one_to_many.h"
 #include "motis/endpoints/one_to_many_post.h"
 #include "motis/endpoints/routing.h"
+#include "motis/osr/car_destination_match_cache.h"
 
 #include "../test_case.h"
 
@@ -980,14 +981,19 @@ TEST(one_to_many, street_routing) {
 }
 
 TEST(one_to_many, street_car_prepared_matches) {
-  auto [d, _config] =
+  auto [stock_data, fixture_config] =
       get_test_case<test_case::FFM_one_to_many_no_osr_footpath>();
-  auto const stock = one_to_many_v1_get(d);
+  auto enabled_config = fixture_config;
+  enabled_config.limits_ = config::read(R"(
+limits:
+  onetomany_car_match_cache_max_bytes: 1048576
+)")
+                               .limits_;
+  auto d = data{stock_data.path_, enabled_config};
+  auto const stock = one_to_many_v1_get(stock_data);
+  auto const candidate = one_to_many_v1_get(d);
   auto const hits_before = d.metrics_->car_snap_cache_hits_.Value();
   auto const misses_before = d.metrics_->car_snap_cache_misses_.Value();
-  auto cache = car_destination_match_cache{*d.l_, 1024U * 1024U, *d.metrics_};
-  auto candidate = stock;
-  candidate.car_destination_matches_ = &cache;
 
   auto const make_query = [](std::string_view origin, std::string_view many,
                              int radius, bool backward) {
@@ -1005,7 +1011,18 @@ TEST(one_to_many, street_car_prepared_matches) {
   };
 
   auto const from = "49.8722439;8.6320624"sv;
-  auto const many = "49.872855;8.632008,0;0,49.872855;8.632008,49.872504;8.628988"sv;
+  auto const many =
+      "49.872855;8.632008,0;0,49.872855;8.632008,49.872504;8.628988"sv;
+  auto const unmatched = make_query("0;0", many, 250, false);
+  auto const unmatched_stock = stock(unmatched);
+  ASSERT_EQ(unmatched_stock.size(), 4U);
+  for (auto const& cell : unmatched_stock) {
+    EXPECT_FALSE(cell.duration_.has_value());
+  }
+  equal(unmatched_stock, candidate(unmatched));
+  EXPECT_EQ(d.metrics_->car_snap_cache_misses_.Value(), misses_before);
+  EXPECT_EQ(d.metrics_->car_snap_cache_hits_.Value(), hits_before);
+
   auto const first = make_query(from, many, 250, false);
   auto const expected = stock(first);
   ASSERT_EQ(expected.size(), 4U);
@@ -1030,9 +1047,8 @@ TEST(one_to_many, street_car_prepared_matches) {
   auto const other_expected = stock(other);
   auto results = std::vector<std::future<api::oneToMany_response>>{};
   for (auto i = 0; i != 4; ++i) {
-    results.emplace_back(std::async(std::launch::async, [&] {
-      return candidate(other);
-    }));
+    results.emplace_back(
+        std::async(std::launch::async, [&] { return candidate(other); }));
   }
   for (auto& result : results) {
     equal(other_expected, result.get());
@@ -1045,21 +1061,58 @@ TEST(one_to_many, street_car_match_lifetime_after_eviction) {
   auto [d, _config] =
       get_test_case<test_case::FFM_one_to_many_no_osr_footpath>();
   auto cache = car_destination_match_cache{*d.l_, 1024U * 1024U, *d.metrics_};
-  auto const many = std::vector{
-      *parse_location("49.872855;8.632008", ';'), *parse_location("0;0", ';')};
+  auto const many = std::vector{*parse_location("49.872855;8.632008", ';'),
+                                *parse_location("0;0", ';')};
   auto const direction = osr::direction::kForward;
-  auto const held = cache.get(many, direction, 250.0);
+  auto const held = cache.get({}, many, direction, 250.0);
   auto const view = (*held)[osr::match_idx_t{0U}];
   ASSERT_FALSE(view.empty());
   auto const way = view.way_.front();
 
   // Another request can evict this entry while the first still reads it.
   for (auto radius = 251.0; radius != 259.0; ++radius) {
-    cache.get(many, direction, radius);
+    cache.get({}, many, direction, radius);
   }
-  auto const fresh = cache.get(many, direction, 250.0);
+  auto const fresh = cache.get({}, many, direction, 250.0);
   EXPECT_NE(held, fresh);
   EXPECT_EQ(view.way_.front(), way);
   EXPECT_TRUE((*held)[osr::match_idx_t{1U}].empty());
   EXPECT_EQ((*fresh)[osr::match_idx_t{0U}].way_.front(), way);
+}
+
+TEST(one_to_many, street_car_match_cache_limits_and_parameters) {
+  auto [d, _config] =
+      get_test_case<test_case::FFM_one_to_many_no_osr_footpath>();
+  auto const many = std::vector{*parse_location("49.872855;8.632008", ';')};
+  auto const dir = osr::direction::kForward;
+  auto cache = car_destination_match_cache{*d.l_, 1024U * 1024U, *d.metrics_};
+
+  // Cold requests for the same key all receive the same published list.
+  auto readers =
+      std::vector<std::future<std::shared_ptr<osr::match_result const>>>{};
+  for (auto i = 0U; i != 4U; ++i) {
+    readers.emplace_back(std::async(
+        std::launch::async, [&] { return cache.get({}, many, dir, 250.0); }));
+  }
+  auto const published = readers.front().get();
+  for (auto i = 1U; i != readers.size(); ++i) {
+    EXPECT_EQ(readers[i].get(), published);
+  }
+  ASSERT_FALSE((*published)[osr::match_idx_t{0U}].empty());
+
+  auto parameters = osr::car::parameters{};
+  parameters.private_gate_penalty_ = osr::cost_t{61U};
+  auto const different = cache.get(parameters, many, dir, 250.0);
+  EXPECT_NE(different, published);
+  EXPECT_EQ(cache.get(parameters, many, dir, 250.0), different);
+  EXPECT_EQ(cache.get({}, many, dir, 250.0), published);
+
+  auto const retained = d.metrics_->car_snap_cache_bytes_.Value();
+  auto too_small = car_destination_match_cache{*d.l_, 1U, *d.metrics_};
+  auto const first = too_small.get({}, many, dir, 250.0);
+  auto const second = too_small.get({}, many, dir, 250.0);
+  EXPECT_NE(first, second);
+  EXPECT_EQ((*first)[osr::match_idx_t{0U}].way_.front(),
+            (*second)[osr::match_idx_t{0U}].way_.front());
+  EXPECT_EQ(d.metrics_->car_snap_cache_bytes_.Value(), retained);
 }

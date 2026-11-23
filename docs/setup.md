@@ -138,6 +138,22 @@ geocoding: true                   # enable geocoding for place/stop name autocom
 reverse_geocoding: false          # enable reverse geocoding for mapping a geo coordinate to nearby places/addresses
 ```
 
+## CAR destination match cache
+
+A positive `limits.onetomany_car_match_cache_max_bytes` enables reuse for
+direct CAR GET and POST requests to `/api/v1/one-to-many`. Requests reuse
+matches when their destination coordinates and levels are in the same
+order and the effective matching distance and direction are the same.
+MOTIS still computes the route from each origin.
+
+The cache keeps up to eight lists per loaded street graph and evicts the
+oldest entries when either limit is reached. For a matrix split into more
+than eight destination tiles, process several origins for each tile before
+moving on to the next tile if you want to reuse its matches. The byte limit
+is an estimate of retained keys and matches. Concurrent cold requests can
+prepare the same list, and lists that a request still uses can outlive
+eviction. These temporary allocations count toward server memory.
+
 # Scenario with Elevators
 
 This is an example configuration for Germany which enables the real-time update of elevators from Deutsche Bahn's FaSta (Facility Status) JSON API. You need to register and obtain an API key.
