@@ -155,6 +155,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
     for r in &st.rows {
         let i: u32 = r[ci].parse()?;
         transfer_time[i as usize] = r[ctt].parse()?;
+        if r[cid].is_empty() {
+            continue; // Nigiri-generated virtual location (no GTFS stop id)
+        }
         if loc_of.insert(r[cid].to_string(), i).is_some() {
             bail!("stop id {} appears in several sources; oracle needs a single dataset", &r[cid]);
         }
