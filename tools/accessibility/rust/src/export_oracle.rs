@@ -42,6 +42,8 @@ struct Conn {
 
 pub struct Tt {
     n_loc: usize,
+    /// start expansion (Nigiri kIntermodal): children of type 0 (generated track) or 3 (virtual)
+    start_children: Vec<Vec<u32>>,
     base: Vec<u32>,
     transfer: Vec<i64>,
     fps: Vec<Vec<(u32, i64)>>,
@@ -53,7 +55,16 @@ pub struct Tt {
 pub fn load(dir: &Path) -> Result<Tt> {
     let lt = Table::read(&dir.join("locations.csv"))?;
     let (cl, cb, ctt) = (lt.col("loc")?, lt.col("base")?, lt.col("transfer_time")?);
+    let (cp, cty) = (lt.col("parent")?, lt.col("type")?);
     let n_loc = lt.rows.len();
+    let mut start_children = vec![Vec::new(); n_loc];
+    for (i, r) in lt.rows.iter().enumerate() {
+        let p: i64 = r[cp].parse()?;
+        let ty: u8 = r[cty].parse()?;
+        if p >= 0 && (ty == 0 || ty == 3) {
+            start_children[p as usize].push(i as u32);
+        }
+    }
     let mut base = vec![0u32; n_loc];
     let mut transfer = vec![0i64; n_loc];
     for (i, r) in lt.rows.iter().enumerate() {
@@ -113,7 +124,7 @@ pub fn load(dir: &Path) -> Result<Tt> {
     }
     conns.sort_by_key(|c| (c.dep, c.arr));
     let stats = serde_json::json!({"locations": n_loc, "footpaths": ft.rows.len(), "routes": routes.len(), "trips": tr.rows.len(), "events": n_ev, "connections": conns.len(), "events_out_of_order": bad_order});
-    Ok(Tt { n_loc, base, transfer, fps, conns, n_trips: tr.rows.len(), stats })
+    Ok(Tt { n_loc, start_children, base, transfer, fps, conns, n_trips: tr.rows.len(), stats })
 }
 
 pub fn run(a: ExportOracleArgs) -> Result<()> {
@@ -142,6 +153,11 @@ pub fn run(a: ExportOracleArgs) -> Result<()> {
             let x = t0 + m;
             if x < ready[s as usize] {
                 ready[s as usize] = x;
+            }
+            for &c in &t.start_children[s as usize] {
+                if x < ready[c as usize] {
+                    ready[c as usize] = x;
+                }
             }
             if t.base[s as usize] == s && x - t0 <= cap && x < out[s as usize] {
                 out[s as usize] = x;
