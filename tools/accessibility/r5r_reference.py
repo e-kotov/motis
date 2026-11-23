@@ -68,7 +68,7 @@ def strictly_increasing(spec, lo, hi, name):
         try:
             v.append(int(x))
         except ValueError:
-            raise ValueError(f"--{name}: bad number {x!r}") from None
+            raise ValueError(f"bad number {x!r}") from None
     for i, x in enumerate(v):
         if not lo <= x <= hi:
             raise ValueError(f"--{name}: {x} is not an integer in [{lo}, {hi}]")
@@ -182,14 +182,18 @@ def main():
         sys.exit(selftest())
     pcts = strictly_increasing(a.percentiles, 1, 100, "percentiles")
     # as the C++ tool: --opportunities needs a non-empty --cutoffs list
-    if a.opportunities and a.cutoffs is None:
-        raise ValueError("missing --cutoffs (required with --opportunities)")
+    if a.opportunities is not None and a.cutoffs is None:
+        raise ValueError("missing --cutoffs")
     cutoffs = strictly_increasing(a.cutoffs, 1, 240, "cutoffs") if a.cutoffs is not None else []
     n_dests, n_dep, unreach, stream = read_stream(a.stream)
     idx = [percentile_index(n_dep, p) for p in pcts]
     opp = {}
-    if a.opportunities:
-        rows = list(csv.DictReader(open(a.opportunities)))
+    if a.opportunities is not None:
+        try:
+            with open(a.opportunities) as f:
+                rows = list(csv.DictReader(f))
+        except OSError:
+            raise ValueError(f"cannot open {a.opportunities}") from None
         for c in a.opportunity_columns.split(","):
             opp[c] = [float(r[c]) for r in rows]
     decay = Decay(a.decay)

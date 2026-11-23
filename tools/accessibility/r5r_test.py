@@ -6,11 +6,12 @@
 Always (r5r_reference.py): the valid stream parses; a stream with its final
 byte (in the transfers block) removed, and one with a trailing partial origin
 id, are rejected (exit 2); --percentiles 100,7 and 7,7 are rejected (exit 2);
---opportunities with --cutoffs omitted or empty ("") is rejected (exit 2), checked
-against a hand-written travel-time-only output (p50) that the reference without
---opportunities reports IDENTICAL, so a false IDENTICAL cannot pass.
+--opportunities with --cutoffs omitted or empty ("") is rejected (exit 2), even
+when --opportunities itself is empty. An empty path with valid cutoffs also fails.
+These cases use a hand-written travel-time-only output (p50) that the reference
+without --opportunities reports IDENTICAL, so a false IDENTICAL cannot pass.
 With the binary also `r5r-reduce`: on the valid stream its outputs equal the
-reference (IDENTICAL), it rejects the same six inputs (exit 2), and the same
+reference (IDENTICAL), it rejects the same invalid inputs (exit 2), and the same
 cutoff cases are rejected against its own travel-time-only output.
 Exit 0 if every expectation holds. Standard library only.
 """
@@ -102,24 +103,27 @@ def main():
 
     # --opportunities needs a non-empty --cutoffs list, as in the C++ tool. Checked against an
     # existing travel-time-only output, where an ignored accessibility part would read IDENTICAL.
+    cutoff_errors = [
+        ("--opportunities with --cutoffs omitted", opp, [], "missing --cutoffs"),
+        ('--opportunities with --cutoffs ""', opp, ["--cutoffs", ""], "bad number ''"),
+        ('--opportunities "" with --cutoffs omitted', "", [], "missing --cutoffs"),
+        ('--opportunities "" with --cutoffs ""', "", ["--cutoffs", ""], "bad number ''"),
+        ('--opportunities "" with valid --cutoffs', "", ["--cutoffs", "15"], "cannot open"),
+    ]
+
     def cutoff_cases(tt_dir, tool):
         rc, out = run([sys.executable, REF, "--stream", valid, "--r5r-dir", tt_dir, "--percentiles", "50"])
         expect(f"reference: {tool} travel-time-only output (no --opportunities) is IDENTICAL",
                rc == 0 and "IDENTICAL" in out, f"(rc={rc}: {out[-200:]})")
-        for label, extra, reason in [("omitted", [], "missing --cutoffs"), ('""', ["--cutoffs", ""], "bad number ''")]:
+        for label, path, extra, reason in cutoff_errors:
             rc, out = run([sys.executable, REF, "--stream", valid, "--r5r-dir", tt_dir, "--percentiles", "50",
-                           "--opportunities", opp, "--opportunity-columns", "pop"] + extra)
-            expect(f"reference rejects --opportunities with --cutoffs {label} ({tool} output)",
+                           "--opportunities", path, "--opportunity-columns", "pop"] + extra)
+            expect(f"reference rejects {label} ({tool} output)",
                    rc == 2 and reason in out, f"(rc={rc}: {out[-160:]})")
 
     tt_hand = os.path.join(tmp, "tt-hand")
     write_ttm_only(tt_hand)
     cutoff_cases(tt_hand, "hand-written")
-    negative += [
-        ("--opportunities with --cutoffs omitted", ["--stream", valid, "--percentiles", "50"], "missing --cutoffs"),
-        ('--opportunities with --cutoffs ""', ["--stream", valid, "--percentiles", "50", "--cutoffs", ""],
-         "bad number ''"),
-    ]
 
     if binary:
         out_dir = os.path.join(tmp, "r5r")
@@ -134,12 +138,15 @@ def main():
         expect("r5r-reduce writes a travel-time-only output", rc == 0, f"(rc={rc}: {out[-160:]})")
         cutoff_cases(tt_bin, "r5r-reduce")
         for label, args, reason in negative:
-            stream = args[1]
-            opts = args[2:] if len(args) > 2 else []
-            cmd = [binary, "r5r-reduce", "--stream", stream, "--r5r-out", os.path.join(tmp, "neg"),
-                   "--opportunities", opp, "--opportunity-columns", "pop"] + (opts or OPTS)
+            cmd = [binary, "r5r-reduce", "--r5r-out", os.path.join(tmp, "neg"),
+                   "--opportunities", opp, "--opportunity-columns", "pop"] + args
             rc, out = run(cmd)
             expect(f"r5r-reduce rejects {label}", rc == 2 and reason in out, f"(rc={rc}: {out[-160:]})")
+        for label, path, extra, reason in cutoff_errors:
+            cmd = [binary, "r5r-reduce", "--stream", valid, "--r5r-out", tt_bin, "--percentiles", "50",
+                   "--opportunities", path, "--opportunity-columns", "pop"] + extra
+            rc, out = run(cmd)
+            expect(f"r5r-reduce rejects {label}", rc == 2 and out == f"error: {reason}", f"(rc={rc}: {out[-160:]})")
     print("r5r_test: OK" if ok else "r5r_test: FAILED")
     sys.exit(0 if ok else 1)
 
