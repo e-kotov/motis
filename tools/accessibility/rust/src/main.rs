@@ -295,6 +295,9 @@ enum Cmd {
         /// direct-walk connectors: every cell coded 254 must equal its direct connector
         #[arg(long)]
         direct: Option<PathBuf>,
+        /// expected departures START,COUNT,STEP (unix minutes)
+        #[arg(long, value_delimiter = ',')]
+        expect_departures: Vec<i64>,
         #[arg(long)]
         json: Option<PathBuf>,
     },
@@ -483,7 +486,12 @@ fn main() -> Result<()> {
         Cmd::SummaryDiff { a, b, origins, weight_col, semantics, t, levels, out } => {
             println!("{}", serde_json::to_string_pretty(&paired::summary_diff(&a, &b, &origins, &weight_col, &semantics, &t, &levels, &out)?)?);
         }
-        Cmd::Validate { stream, expect_origins, expect_all_origins, max_transfers, allow_walk_via_stop, require_transfers, direct, json } => {
+        Cmd::Validate { stream, expect_origins, expect_all_origins, max_transfers, allow_walk_via_stop, require_transfers, direct, expect_departures, json } => {
+            let deps_expected = match expect_departures.as_slice() {
+                [] => None,
+                [s0, c, st] if *c > 0 && *st > 0 => Some(departures(*s0, *c, *st)),
+                _ => bail!("--expect-departures needs START,COUNT,STEP with COUNT, STEP > 0"),
+            };
             if max_transfers > 14 {
                 bail!("--max-transfers must be in [0, 14]");
             }
@@ -492,7 +500,7 @@ fn main() -> Result<()> {
                 None if !expect_origins.is_empty() => Some(expect_origins),
                 None => None,
             };
-            let ex = validate::Expect { origins, max_transfers, allow_walk_via_stop, require_transfers, direct: direct.as_ref().map(|p| validate::read_direct(p)).transpose()? };
+            let ex = validate::Expect { origins, max_transfers, allow_walk_via_stop, require_transfers, direct: direct.as_ref().map(|p| validate::read_direct(p)).transpose()?, departures: deps_expected };
             let rep = validate::validate(&stream, &ex)?;
             let txt = serde_json::to_string_pretty(&rep)?;
             println!("{}", txt);

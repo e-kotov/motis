@@ -14,6 +14,8 @@ pub struct Expect {
     pub allow_walk_via_stop: bool,
     pub require_transfers: bool,
     pub direct: Option<HashMap<(u32, u32), u16>>,
+    /// expected departures (unix minutes), checked element-wise against the header
+    pub departures: Option<Vec<i64>>,
 }
 
 pub fn read_direct(p: &Path) -> Result<HashMap<(u32, u32), u16>> {
@@ -35,6 +37,14 @@ pub fn validate(stream: &Path, ex: &Expect) -> Result<serde_json::Value> {
     }
     if h.origin_from > h.origin_to || h.origin_to > h.n_origins_total {
         err(format!("bad origin range [{}, {}) of {}", h.origin_from, h.origin_to, h.n_origins_total), &mut errors);
+    }
+    if let Some(exp) = &ex.departures {
+        if *exp != h.departures {
+            err(format!("departures {:?}.. differ from expected {:?}..", &h.departures[..h.departures.len().min(3)], &exp[..exp.len().min(3)]), &mut errors);
+        }
+    }
+    if h.departures.windows(2).any(|w| w[1] <= w[0]) {
+        err("departures not strictly increasing".into(), &mut errors);
     }
     if h.target > 1 {
         err(format!("bad target {}", h.target), &mut errors);
