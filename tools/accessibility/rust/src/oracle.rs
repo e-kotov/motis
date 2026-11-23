@@ -307,9 +307,14 @@ pub fn run(a: OracleArgs) -> Result<()> {
             }
         }
     }
-    let stock = match a.semantics.as_str() {
-        "stock" => true,
-        "strict" => false,
+    // stock: transit arrivals only if strictly earlier than the access walk (Nigiri
+    // one_to_all + stock egress from rounds >= 1); strict: every transit arrival;
+    // walkstop: stock rounds plus round 0 (walk origin->stop->destination allowed),
+    // which equals min(transit, access walk) per stop.
+    let (stock, walkstop) = match a.semantics.as_str() {
+        "stock" => (true, false),
+        "strict" => (false, false),
+        "walkstop" => (false, true),
         s => bail!("unknown semantics {s}"),
     };
     let deps: Vec<i64> = (0..a.dep_count).map(|i| a.dep_start_unix_minutes + i * a.dep_step).collect();
@@ -390,6 +395,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 }
                 for s in 0..n_loc {
                     let mut v = arr_t[s];
+                    if walkstop {
+                        v = v.min(arr0[s]);
+                    }
                     if v >= INF || (stock && v >= arr0[s]) {
                         continue;
                     }

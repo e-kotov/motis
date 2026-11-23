@@ -66,6 +66,7 @@ constexpr auto kUnreachable = std::uint8_t{255U};
 constexpr auto kUnreachable16 = std::uint16_t{0xFFFFU};
 constexpr auto kMaxCap = 1440U;  // u16 path; one day
 constexpr auto kDirectWalk = std::uint8_t{254U};
+constexpr auto kWalkViaStop = std::uint8_t{253U};  // round-0 egress (no vehicle)
 constexpr auto kNoStop = std::uint32_t{0xFFFFFFFFU};
 
 using clock_t_ = std::chrono::steady_clock;
@@ -552,6 +553,13 @@ int cmd_route(args const& a) {
   auto const max_transfers =
       static_cast<std::uint8_t>(a.integer("max-transfers", n::routing::kMaxTransfers));
   auto const with_transfers = a.has("with-transfers");
+  // transit (default, = stock one-to-many): egress only from rounds k >= 1.
+  // all: also from round 0, i.e. walk origin->stop->destination without a vehicle.
+  auto const egress_rounds = a.str("egress-rounds", "transit");
+  if (egress_rounds != "transit" && egress_rounds != "all") {
+    throw std::runtime_error("--egress-rounds must be transit|all");
+  }
+  auto const egress_round0 = egress_rounds == "all";
   auto const with_via = a.has("with-egress-stop");
   auto const n_threads = static_cast<unsigned>(a.integer("threads", 1));
   auto const out_path = a.str("out");
@@ -702,7 +710,7 @@ int cmd_route(args const& a) {
                 tt, state, n::direction::kForward, n::location_idx_t{s},
                 start_time, max_transfers,
                 [&](std::uint8_t const k, n::duration_t const d) {
-                  if (k != 0U && d.count() < best) {
+                  if ((k != 0U || egress_round0) && d.count() < best) {
                     best = d.count();
                     best_k = k;
                   }
@@ -713,7 +721,9 @@ int cmd_route(args const& a) {
             for (auto j = egress.begin_[s]; j != egress.begin_[s + 1U]; ++j) {
               auto const d = egress.value_[j];
               auto const total = best + egress.minutes_[j];
-              auto const transfers = static_cast<std::uint8_t>(best_k - 1U);
+              auto const transfers =
+                  best_k == 0U ? kWalkViaStop
+                               : static_cast<std::uint8_t>(best_k - 1U);
               if (total > max_travel) {
                 continue;
               }
@@ -780,12 +790,12 @@ int cmd_route(args const& a) {
   auto const route_ms = ms_since(t_route);
   auto const json = fmt::format(
       "{{\"tool\":\"motis-accessibility\",\"format_version\":{},"
-      "\"target\":\"{}\",\"origins\":[{},{}],\"n_dests\":{},\"n_departures\":{},"
+      "\"target\":\"{}\",\"egress_rounds\":\"{}\",\"origins\":[{},{}],\"n_dests\":{},\"n_departures\":{},"
       "\"threads\":{},\"discard\":{},\"max_travel_minutes\":{},\"queries\":{},\"load_ms\":{:.3f},\"connectors_ms\":{:.3f},"
       "\"route_wall_ms\":{:.3f},\"kernel_thread_ms\":{:.3f},"
       "\"reduce_thread_ms\":{:.3f},\"write_thread_ms\":{:.3f},"
       "\"peak_rss_kb\":{},\"n_locations\":{}}}",
-      kFormatVersion, target_stops ? "stops" : "dests", origin_from, origin_to,
+      kFormatVersion, target_stops ? "stops" : "dests", egress_rounds, origin_from, origin_to,
       n_dests, dep_count, n_threads, discard, max_travel, n_queries.load(), l.load_ms_, conn_ms,
       route_ms, kernel_ns.load() / 1e6, reduce_ns.load() / 1e6,
       write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations());

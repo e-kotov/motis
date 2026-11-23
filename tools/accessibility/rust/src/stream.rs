@@ -7,7 +7,7 @@
 //! 5 x u32 reserved; then n_departures x i64 departure (unix minutes, UTC).
 //! records (any order): u32 origin; tt[n_departures][n_dests] as u8 (0..=max minutes,
 //! 255 unreachable) or, with flag bit2 (`tt16`, required when max > 253), as u16
-//! (65535 unreachable); optional u8 transfers[..] (0.., 254 direct walk, 255
+//! (65535 unreachable); optional u8 transfers[..] (0.., 253 walk via stop without vehicle, 254 direct walk, 255
 //! unreachable); optional u32 egress_stop[..] (0xFFFFFFFF none).
 //! In memory, travel times are always u16 with `UNREACHABLE` = 65535.
 
@@ -19,6 +19,7 @@ use std::path::Path;
 pub const UNREACHABLE: u16 = u16::MAX;
 pub const TR_UNREACHABLE: u8 = 255;
 pub const DIRECT_WALK: u8 = 254;
+pub const WALK_VIA_STOP: u8 = 253;
 pub const NO_STOP: u32 = u32::MAX;
 pub const FLAG_TRANSFERS: u8 = 1;
 pub const FLAG_VIA: u8 = 2;
