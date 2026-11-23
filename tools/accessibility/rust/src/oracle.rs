@@ -20,6 +20,10 @@
 //!   one_to_all keeps only strictly improving rounds and stock egress skips round
 //!   0). `strict` uses every transit arrival.
 //! - Unlimited transfers (CSA); Nigiri stops at kMaxTransfers = 14.
+//! - GTFS transfers.txt `transfer_type=3` trip-to-trip rules (from_trip, to_trip,
+//!   from_stop, to_stop) forbid boarding the to-trip with readiness that came from the
+//!   from-trip alighting at from_stop; readiness is kept per stop as up to 6 labels with
+//!   distinct source trips (overflow is counted). Other transfer types are not modelled.
 
 use crate::geo::{read_connectors, Table};
 use crate::stream::{Header, Record, Writer, DIRECT_WALK, UNREACHABLE};
@@ -205,11 +209,33 @@ pub fn run(a: OracleArgs) -> Result<()> {
             warnings.push(format!("frequencies.txt has {} rows (not expanded by the oracle)", rows.len()));
         }
     }
+    let mut forb_raw: Vec<(String, String, u32, u32)> = Vec::new();
     if let Some((h, rows)) = g.table("transfers.txt")? {
         if let Some(c) = col(&h, "transfer_type") {
             let n4 = rows.iter().filter(|r| r.get(c).map(|x| x.trim()) == Some("4")).count();
             if n4 > 0 {
                 warnings.push(format!("transfers.txt has {} stay-seated (type 4) rows (not modelled)", n4));
+            }
+            let g_ = |r: &csv::StringRecord, n: &str| col(&h, n).and_then(|i| r.get(i)).map(|x| x.trim().to_string()).unwrap_or_default();
+            let mut other = 0u64;
+            for r in &rows {
+                if r.get(c).map(|x| x.trim()) != Some("3") {
+                    if r.get(c).map(|x| x.trim()).unwrap_or("") != "" && r.get(c).map(|x| x.trim()) != Some("0") {
+                        other += 1;
+                    }
+                    continue;
+                }
+                let (ft, tt_, fs, ts) = (g_(r, "from_trip_id"), g_(r, "to_trip_id"), g_(r, "from_stop_id"), g_(r, "to_stop_id"));
+                if ft.is_empty() || tt_.is_empty() {
+                    warnings.push("transfers.txt type 3 row without trip ids (not modelled)".into());
+                    continue;
+                }
+                if let (Some(&x), Some(&y)) = (loc_of.get(&fs), loc_of.get(&ts)) {
+                    forb_raw.push((ft, tt_, x, y));
+                }
+            }
+            if other > 0 {
+                warnings.push(format!("transfers.txt has {} rows of types 1/2/4/5 (not modelled beyond the exported footpaths)", other));
             }
         }
     }
@@ -290,6 +316,18 @@ pub fn run(a: OracleArgs) -> Result<()> {
             }
         }
     }
+    // trip instance -> GTFS trip id index, and the forbidden-transfer set
+    let mut trip_idx: HashMap<String, u32> = HashMap::new();
+    let mut inst_gtfs = vec![u32::MAX; n_trip_inst as usize];
+    for (name, inst) in &inst_names {
+        let tid = name.rsplit_once('@').map(|x| x.0).unwrap_or(name).to_string();
+        let n = trip_idx.len() as u32;
+        inst_gtfs[*inst as usize] = *trip_idx.entry(tid).or_insert(n);
+    }
+    let forb: std::collections::HashSet<(u32, u32, u32, u32)> = forb_raw
+        .iter()
+        .filter_map(|(a_, b_, x, y)| Some((*trip_idx.get(a_)?, *trip_idx.get(b_)?, *x, *y)))
+        .collect();
     let mut succ: Vec<u32> = vec![u32::MAX; n_trip_inst as usize];
     for v in blocks.values_mut() {
         v.sort();
@@ -379,6 +417,33 @@ pub fn run(a: OracleArgs) -> Result<()> {
     let mut arr_src = vec![(u32::MAX, u32::MAX); n_loc]; // (connection idx, via footpath from stop)
     let mut ready_src = vec![u32::MAX; n_loc]; // connection idx (u32::MAX = access walk)
     let mut board = vec![(u32::MAX, 0i64); n_trip_inst as usize]; // (boarding stop, time)
+    // readiness labels (time, source trip instance or MAX for access, alight stop) per stop,
+    // only used when forbidden trip-to-trip transfers exist
+    const K: usize = 6;
+    let use_labels = !forb.is_empty();
+    let mut labels: Vec<Vec<(i64, u32, u32)>> = vec![Vec::new(); if use_labels { n_loc } else { 0 }];
+    let mut touched: Vec<u32> = Vec::new();
+    let mut label_overflow = 0u64;
+    let mut forbidden_hits = 0u64;
+    let add_label = |labels: &mut Vec<Vec<(i64, u32, u32)>>, touched: &mut Vec<u32>, overflow: &mut u64, st: usize, l: (i64, u32, u32)| {
+        let v = &mut labels[st];
+        if v.is_empty() {
+            touched.push(st as u32);
+        }
+        if let Some(e) = v.iter_mut().find(|e| e.1 == l.1) {
+            if l.0 < e.0 {
+                *e = l;
+            }
+        } else if v.len() < K {
+            v.push(l);
+        } else {
+            *overflow += 1;
+            let (wi, wt) = v.iter().enumerate().max_by_key(|(_, e)| e.0).map(|(i, e)| (i, e.0)).unwrap();
+            if l.0 < wt {
+                v[wi] = l;
+            }
+        }
+    };
     let t1 = std::time::Instant::now();
     let mut scanned = 0u64;
     for &o in &a.sample {
@@ -388,10 +453,17 @@ pub fn run(a: OracleArgs) -> Result<()> {
             arr_t.iter_mut().for_each(|x| *x = INF);
             arr0.iter_mut().for_each(|x| *x = INF);
             boarded.iter_mut().for_each(|x| *x = false);
+            for &st in &touched {
+                labels[st as usize].clear();
+            }
+            touched.clear();
             let want = explain.iter().any(|e| e.0 == o && e.1 == di);
             for &(s, m) in &acc[o as usize] {
                 ready[s as usize] = ready[s as usize].min(t + m);
                 arr0[s as usize] = arr0[s as usize].min(t + m);
+                if use_labels {
+                    add_label(&mut labels, &mut touched, &mut label_overflow, s as usize, (t + m, u32::MAX, u32::MAX));
+                }
             }
             let start = conns.partition_point(|c| c.dep < t);
             for (ci, c) in conns[start..].iter().enumerate() {
@@ -402,7 +474,16 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 scanned += 1;
                 let ti = c.trip as usize;
                 if !boarded[ti] {
-                    if c.pickup && ready[c.from as usize] <= c.dep {
+                    let ok = c.pickup
+                        && ready[c.from as usize] <= c.dep
+                        && (!use_labels
+                            || labels[c.from as usize].iter().any(|&(lt, src, x)| {
+                                lt <= c.dep && (src == u32::MAX || !forb.contains(&(inst_gtfs[src as usize], inst_gtfs[ti], x, c.from)))
+                            }));
+                    if use_labels && c.pickup && ready[c.from as usize] <= c.dep && !ok {
+                        forbidden_hits += 1;
+                    }
+                    if ok {
                         boarded[ti] = true;
                         if want {
                             board[ti] = (c.from, c.dep);
@@ -425,6 +506,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
                     }
                 }
                 let r = c.arr + transfer_time[to];
+                if use_labels {
+                    add_label(&mut labels, &mut touched, &mut label_overflow, to, (r, c.trip, c.to));
+                }
                 if r < ready[to] {
                     ready[to] = r;
                     if want {
@@ -433,6 +517,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 }
                 for &(f, d) in &fps[to] {
                     let x = c.arr + d;
+                    if use_labels && x - t <= cap {
+                        add_label(&mut labels, &mut touched, &mut label_overflow, f as usize, (x, c.trip, c.to));
+                    }
                     if x - t <= cap {
                         if x < arr_t[f as usize] {
                             arr_t[f as usize] = x;
@@ -544,6 +631,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
             "prepare_seconds": prep_s,
             "scan_seconds": t1.elapsed().as_secs_f64(),
             "explanations": explanations,
+            "forbidden_transfer_rules": forb.len(),
+            "boardings_blocked_by_rules": forbidden_hits,
+            "readiness_label_overflow": label_overflow,
         }))?
     );
     Ok(())
