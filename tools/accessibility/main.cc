@@ -666,6 +666,14 @@ struct reuse_ctx {
   std::uint64_t init_ns_{}, scan_ns_{}, finish_ns_{};
 };
 
+// Nigiri versions with `one_to_all(tt, rtt, q, raptor_state&)` run the stock
+// one_to_all into a reused state (then only the total is timed, as scan).
+template <typename TT>
+constexpr bool kHasReusableOneToAll =
+    requires(TT const& tt, n::routing::query const& q, n::routing::raptor_state& s) {
+      n::routing::one_to_all<n::direction::kForward>(tt, nullptr, q, s);
+    };
+
 n::routing::raptor_state const& one_to_all_reuse(n::timetable const& tt,
                                                  n::routing::query const& q,
                                                  reuse_ctx& c) {
@@ -676,6 +684,11 @@ n::routing::raptor_state const& one_to_all_reuse(n::timetable const& tt,
         std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
   };
   auto const t0 = clock_t_::now();
+  if constexpr (kHasReusableOneToAll<n::timetable>) {
+    r::one_to_all<n::direction::kForward>(tt, nullptr, q, c.state_);
+    c.scan_ns_ += ns(t0, clock_t_::now());
+    return c.state_;
+  }
   auto const start_time = std::get<n::unixtime_t>(q.start_time_);
   if (c.is_dest_.size() != tt.n_locations()) {
     c.is_dest_ = n::bitvec{tt.n_locations()};
@@ -1078,13 +1091,14 @@ int cmd_route(args const& a) {
       "\"threads\":{},\"discard\":{},\"max_travel_minutes\":{},\"max_transfers\":{},\"queries\":{},\"load_ms\":{:.3f},\"connectors_ms\":{:.3f},"
       "\"route_wall_ms\":{:.3f},\"kernel_thread_ms\":{:.3f},"
       "\"reduce_thread_ms\":{:.3f},\"write_thread_ms\":{:.3f},"
-      "\"peak_rss_kb\":{},\"n_locations\":{},\"reuse_state\":{},"
+      "\"peak_rss_kb\":{},\"n_locations\":{},\"reuse_state\":{},\"nigiri_reusable_one_to_all\":{},"
       "\"reuse_init_thread_ms\":{:.3f},\"reuse_scan_thread_ms\":{:.3f},\"reuse_finish_thread_ms\":{:.3f}}}",
       kFormatVersion, target_stops ? "stops" : "dests", egress_rounds, origin_from, origin_to,
       n_dests, dep_count, n_threads, discard, max_travel,
       static_cast<int>(max_transfers), n_queries.load(), l.load_ms_, conn_ms,
       route_ms, kernel_ns.load() / 1e6, reduce_ns.load() / 1e6,
       write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations(), reuse_state,
+      kHasReusableOneToAll<n::timetable>,
       reuse_init_ns.load() / 1e6, reuse_scan_ns.load() / 1e6, reuse_finish_ns.load() / 1e6);
   if (!timing_path.empty()) {
     auto tj = std::ofstream{timing_path};
