@@ -128,11 +128,13 @@ ORDER = ["loc_parent", "loc_type", "loc_transfer", "loc_base", "loc_traffic", "l
          "trip_last_arr", "ev_begin", "ev_arr", "ev_dep"]
 
 
-def write(path, meta, sections):
-    """Write sections (name -> sequence) as timetable.vrtt, in the exporter's layout."""
-    data_offset = HEADER.size + len(ORDER) * ENTRY.size
+def write(path, meta, sections, order=None):
+    """Write sections (name -> sequence) as timetable.vrtt, in the exporter's layout.
+    `order` (default: all sections in exporter order) is only for tests."""
+    order = ORDER if order is None else order
+    data_offset = HEADER.size + len(order) * ENTRY.size
     blobs, entries, offset = [], [], data_offset
-    for name in ORDER:
+    for name in order:
         a = array.array(TYPES[name], sections[name])
         if sys.byteorder != "little":
             a.byteswap()
@@ -145,7 +147,7 @@ def write(path, meta, sections):
     data = bytearray(end - data_offset)
     for off, b in blobs:
         data[off - data_offset:off - data_offset + len(b)] = b
-    header = HEADER.pack(b"VRTTEXP1", 1, len(ORDER), meta["from_unix_minutes"], meta["to_unix_minutes"],
+    header = HEADER.pack(b"VRTTEXP1", 1, len(order), meta["from_unix_minutes"], meta["to_unix_minutes"],
                          meta["days_from"], meta["days_to"], data_offset, fnv1a64(data))
     with open(path, "wb") as f:
         f.write(header + b"".join(entries) + bytes(data))

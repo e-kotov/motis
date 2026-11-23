@@ -4,10 +4,12 @@
     vrtt_test.py VALID.vrtt [TMP_DIR]
     vrtt_test.py --synthetic [TMP_DIR]   (writes a small valid export with vrtt.write first)
 
-The valid file must pass. Each corrupted copy must be rejected (exit 2):
-duplicate section (replacing a required one), unknown / missing section,
-reversed export interval, mismatched CSR index array, non-monotone index array
-and a flipped payload byte. Except for the last case the checksum is recomputed,
+The valid file must pass. Each corrupted copy must be rejected (exit 2) with
+its own expected reason, each corruption isolated so that no earlier check
+fires: duplicate section (replacing a required one), unknown section, missing
+section (file re-laid out without it), reversed export interval, mismatched CSR
+index array, non-monotone index array (final entry intact) and a flipped payload
+byte. Except for the last case the checksum is recomputed (or the file rewritten)
 so only the structural checks can catch them. Exit 0 if all expectations hold.
 """
 import os
@@ -54,17 +56,21 @@ def bump_last(buf, name):
 
 
 def unsort(buf, name):
+    """begin[1] := begin[2] + 1: not monotone, while begin[0] = 0 and the final
+    entry (the payload length) stay intact, so only the monotonicity check fires."""
     _, elem, offset, count = directory(buf)[name]
     fmt = {4: "<I", 8: "<Q"}[elem]
-    # find i with begin[i] < begin[i+1] and swap them
-    for i in range(1, count - 1):
-        a = struct.unpack_from(fmt, buf, offset + i * elem)[0]
-        b = struct.unpack_from(fmt, buf, offset + (i + 1) * elem)[0]
-        if a < b:
-            struct.pack_into(fmt, buf, offset + i * elem, b)
-            struct.pack_into(fmt, buf, offset + (i + 1) * elem, a)
-            return
-    raise RuntimeError(f"{name}: nothing to unsort")
+    if count < 3:
+        raise RuntimeError(f"{name}: too short to unsort")
+    nxt = struct.unpack_from(fmt, buf, offset + 2 * elem)[0]
+    struct.pack_into(fmt, buf, offset + elem, nxt + 1)
+
+
+def drop_section(src, dst, name):
+    """Re-lay the file out without one section (consistent directory, no unknown
+    name), so only the missing-section check fires."""
+    meta, s = vrtt.load(src)
+    vrtt.write(dst, meta, s, order=[x for x in vrtt.ORDER if x != name])
 
 
 def flip_payload(buf):
@@ -72,13 +78,20 @@ def flip_payload(buf):
     buf[offset + (count // 2) * elem] ^= 0x01
 
 
+# (label, corruption, recompute checksum, expected rejection reason)
 CASES = [
-    ("duplicate section (loc_lon renamed to loc_lat)", lambda b: rename(b, "loc_lon", "loc_lat"), True),
-    ("unknown section / missing loc_src", lambda b: rename(b, "loc_src", "loc_srcx"), True),
-    ("reversed export interval", swap_interval, True),
-    ("mismatched index array (fp_begin end + 1)", lambda b: bump_last(b, "fp_begin"), True),
-    ("non-monotone index array (ev_begin)", lambda b: unsort(b, "ev_begin"), True),
-    ("flipped payload byte (ev_arr), checksum kept", flip_payload, False),
+    ("duplicate section (loc_lon renamed to loc_lat)", lambda b: rename(b, "loc_lon", "loc_lat"), True,
+     "duplicate section 'loc_lat'"),
+    ("unknown section (loc_src renamed to loc_srcx)", lambda b: rename(b, "loc_src", "loc_srcx"), True,
+     "unknown section 'loc_srcx'"),
+    ("missing section (loc_src dropped, file re-laid out)", "drop:loc_src", False,
+     "missing sections ['loc_src']"),
+    ("reversed export interval", swap_interval, True, "export interval: from > to"),
+    ("mismatched index array (fp_begin end + 1)", lambda b: bump_last(b, "fp_begin"), True,
+     "fp_begin: ends at"),
+    ("non-monotone index array (ev_begin[1], final entry intact)", lambda b: unsort(b, "ev_begin"), True,
+     "ev_begin: not monotone"),
+    ("flipped payload byte (ev_arr), checksum kept", flip_payload, False, "checksum mismatch"),
 ]
 
 
@@ -119,17 +132,20 @@ def main():
     rc, err = check(src)
     print(f"valid {src}: rc={rc} {err}")
     ok &= rc == 0
-    for i, (label, corrupt, rechk) in enumerate(CASES):
-        buf = bytearray(open(src, "rb").read())
-        corrupt(buf)
-        if rechk:
-            rechecksum(buf)
+    for i, (label, corrupt, rechk, reason) in enumerate(CASES):
         path = os.path.join(tmp, f"case{i}.vrtt")
-        open(path, "wb").write(buf)
+        if isinstance(corrupt, str) and corrupt.startswith("drop:"):
+            drop_section(src, path, corrupt[5:])
+        else:
+            buf = bytearray(open(src, "rb").read())
+            corrupt(buf)
+            if rechk:
+                rechecksum(buf)
+            open(path, "wb").write(buf)
         rc, err = check(path)
-        good = rc == 2
+        good = rc == 2 and reason in err
         ok &= good
-        print(f"{'REJECTED' if good else 'ACCEPTED (WRONG)'} {label}: rc={rc} {err}")
+        print(f"{'REJECTED' if good else 'WRONG'} {label}: rc={rc} {err} (expected reason: {reason})")
         os.remove(path)
     print("vrtt_test: OK" if ok else "vrtt_test: FAILED")
     sys.exit(0 if ok else 1)
