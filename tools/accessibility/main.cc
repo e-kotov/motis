@@ -126,6 +126,15 @@ struct args {
   std::int64_t integer(std::string const& k, std::int64_t const def) const {
     return has(k) ? integer(k) : def;
   }
+  std::int64_t checked(std::string const& k, std::int64_t const def,
+                       std::int64_t const lo, std::int64_t const hi) const {
+    auto const v = integer(k, def);
+    if (v < lo || v > hi) {
+      throw std::runtime_error(
+          fmt::format("--{} must be in [{}, {}], got {}", k, lo, hi, v));
+    }
+    return v;
+  }
   void check_all_used() const {
     for (auto const& [k, v] : kv_) {
       if (!used_.contains(k)) {
@@ -390,7 +399,7 @@ int cmd_connectors(args const& a) {
   auto const max = std::chrono::seconds{a.integer("max-seconds")};
   auto const max_matching = a.num("max-matching-distance", 25.0);
   auto const params = walk_params(a);
-  auto const n_threads = static_cast<unsigned>(a.integer("threads", 1));
+  auto const n_threads = static_cast<unsigned>(a.checked("threads", 1, 1, 4096));
   auto const out_path = a.str("out");
   a.check_all_used();
 
@@ -457,7 +466,7 @@ int cmd_direct(args const& a) {
   auto const radius = a.num("radius-m");
   auto const max_matching = a.num("max-matching-distance", 25.0);
   auto const params = walk_params(a);
-  auto const n_threads = static_cast<unsigned>(a.integer("threads", 1));
+  auto const n_threads = static_cast<unsigned>(a.checked("threads", 1, 1, 4096));
   auto const out_path = a.str("out");
   a.check_all_used();
 
@@ -535,13 +544,16 @@ int cmd_route(args const& a) {
   auto const l = loaded{a.str("data")};
   auto const& tt = *l.d_->tt_;
   auto const target_stops = a.str("target", "dests") == "stops";
-  auto const n_origins = static_cast<std::uint32_t>(a.integer("n-origins"));
-  auto const n_dests = target_stops
-                           ? static_cast<std::uint32_t>(tt.n_locations())
-                           : static_cast<std::uint32_t>(a.integer("n-dests"));
-  auto const origin_from = static_cast<std::uint32_t>(a.integer("origin-from", 0));
+  constexpr auto kMaxPoints = std::int64_t{100'000'000};
+  auto const n_origins =
+      static_cast<std::uint32_t>(a.checked("n-origins", -1, 0, kMaxPoints));
+  auto const n_dests =
+      target_stops ? static_cast<std::uint32_t>(tt.n_locations())
+                   : static_cast<std::uint32_t>(a.checked("n-dests", -1, 0, kMaxPoints));
+  auto const origin_from =
+      static_cast<std::uint32_t>(a.checked("origin-from", 0, 0, n_origins));
   auto const origin_to = static_cast<std::uint32_t>(
-      std::min<std::int64_t>(a.integer("origin-to", n_origins), n_origins));
+      a.checked("origin-to", n_origins, origin_from, n_origins));
   // Optional explicit origin subset (comma-separated indices), else the range.
   auto origin_list = std::vector<std::uint32_t>{};
   if (a.has("origin-list")) {
@@ -559,8 +571,18 @@ int cmd_route(args const& a) {
     }
   }
   auto const dep_start = a.integer("dep-start-unix-minutes");
-  auto const dep_count = static_cast<std::uint32_t>(a.integer("dep-count", 1));
-  auto const dep_step = a.integer("dep-step-minutes", 1);
+  auto const dep_count = static_cast<std::uint32_t>(a.checked("dep-count", 1, 1, 100'000));
+  auto const dep_step = a.checked("dep-step-minutes", 1, 1, 1440);
+  {
+    // every departure must lie inside the loaded timetable interval
+    auto const ext = tt.external_interval();
+    auto const first = n::unixtime_t{n::i32_minutes{static_cast<std::int32_t>(dep_start)}};
+    auto const last = n::unixtime_t{n::i32_minutes{
+        static_cast<std::int32_t>(dep_start + (dep_count - 1) * dep_step)}};
+    if (!ext.contains(first) || !ext.contains(last)) {
+      throw std::runtime_error("departures outside the loaded timetable interval");
+    }
+  }
   auto const max_travel_arg = a.integer("max-travel-minutes");
   if (max_travel_arg < 0 || max_travel_arg > static_cast<std::int64_t>(kMaxCap)) {
     throw std::runtime_error("max-travel-minutes must be in [0, 1440]");
@@ -586,7 +608,7 @@ int cmd_route(args const& a) {
   }
   auto const egress_round0 = egress_rounds == "all";
   auto const with_via = a.has("with-egress-stop");
-  auto const n_threads = static_cast<unsigned>(a.integer("threads", 1));
+  auto const n_threads = static_cast<unsigned>(a.checked("threads", 1, 1, 4096));
   auto const out_path = a.str("out");
   auto const timing_path = a.str("timing-json", "");
   auto const discard = a.has("discard");  // timing-only: compute, write no records
