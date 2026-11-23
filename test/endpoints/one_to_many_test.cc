@@ -5,6 +5,7 @@
 #endif
 
 #include <chrono>
+#include <cmath>
 #include <optional>
 #include <vector>
 
@@ -16,6 +17,7 @@
 
 #include "motis/config.h"
 #include "motis/endpoints/one_to_many.h"
+#include "motis/endpoints/one_to_many_offsets_cache.h"
 #include "motis/endpoints/one_to_many_post.h"
 #include "motis/endpoints/routing.h"
 
@@ -973,6 +975,149 @@ TEST(one_to_many, street_routing) {
       // Notice: plan_distance sums per-segment distances truncated to whole
       // metres (start connector, path, destination connector)
       EXPECT_NEAR(post_distance, plan_distance + 1.5, 1.5);
+    }
+  }
+}
+
+// Requests that share their many places reuse the cached many-side offsets.
+// Each response equals the one computed without the cache, also when requests
+// with different street parameters for the many side are interleaved, and
+// requests the cache must not serve (wheelchair) bypass it.
+TEST(one_to_many, offsets_cache_matches_uncached) {
+  auto [d, _config] = get_test_case<test_case::FFM_one_to_many>();
+  ASSERT_NE(nullptr, d.one_to_many_offsets_cache_);
+
+  auto const cached = one_to_many_get(d);
+  auto uncached = one_to_many_get(d);
+  uncached.offsets_cache_ = nullptr;
+
+  auto const many = std::string{
+      "&many="
+      "49.87336;8.62926,"  // DA_10
+      "50.10593;8.66118,"  // FFM_10
+      "50.107577;8.6638173,"  // de:6412:10:6:1
+      "50.10739;8.66333,"  // FFM_101
+      "50.11385;8.67912,"  // FFM_HAUPT_U
+      "50.11385;8.67912;-4,"  // FFM_HAUPT_U, platform level
+      "50.11404;8.67824,"  // FFM_HAUPT_S
+      "49.872504;8.628988,"  // Inside DA station
+      "50.106596;8.663485,"  // Inside FFM station
+      "50.113494;8.679129,"  // Near FFM_HAUPT_U
+      "50.114520;8.673050"};  // Too far from FFM_HAUPT_U
+  auto const queries = std::vector<std::string>{
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=420",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=240",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=20&maxPostTransitTime=420",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=420"
+          "&postTransitModes=BIKE",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:40:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=420&maxTransfers=0",
+      "?one=50.11385;8.67912;-4" + many +
+          "&time=2019-04-30T23:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPreTransitTime=420&arriveBy=true",
+      "?one=50.11385;8.67912;-4" + many +
+          "&time=2019-04-30T23:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=240"
+          "&pedestrianProfile=WHEELCHAIR"};
+
+  auto n_reachable = 0U;
+  for (auto round = 0U; round != 2U; ++round) {
+    for (auto const& q : queries) {
+      auto const url = "/api/experimental/one-to-many-intermodal" + q;
+      auto const expected = uncached(url);
+      auto const actual = cached(url);
+      EXPECT_EQ(expected, actual) << url;
+      ASSERT_TRUE(expected.transit_durations_.has_value());
+      for (auto const& set : *expected.transit_durations_) {
+        n_reachable += set.empty() ? 0U : 1U;
+      }
+    }
+  }
+  EXPECT_LT(0U, n_reachable);
+  // Five many-side parameter sets: the request at 22:40 shares its set with
+  // the first one (time and transfer limit are not part of the key) and the
+  // wheelchair request is not cached. 11 places each. Hits: the 22:40 request
+  // in the first round and all six cacheable requests in the second.
+  EXPECT_EQ(5U * 11U, d.one_to_many_offsets_cache_->size());
+  EXPECT_EQ(5U * 11U, d.one_to_many_offsets_cache_->misses_.load());
+  EXPECT_EQ(7U * 11U, d.one_to_many_offsets_cache_->hits_.load());
+}
+
+// Cache keys: equality and hash agree ((a == b) implies hash(a) == hash(b)),
+// coordinates are compared exactly (a coordinate one ulp away is a different
+// street search, even where osr::location's tolerant equality says equal),
+// and -0.0 / +0.0 are the same value.
+TEST(one_to_many, offsets_cache_key_equality_and_hash_agree) {
+  using cache = ep::one_to_many_offsets_cache;
+  auto const make = [](double const lat, double const lng) {
+    return cache::key{.place_ = osr::location{{lat, lng}, osr::level_t{}},
+                      .dir_ = osr::direction::kBackward,
+                      .modes_ = {api::ModeEnum::WALK},
+                      .osr_params_ = {},
+                      .pedestrian_profile_ = api::PedestrianProfileEnum::FOOT,
+                      .elevation_costs_ = api::ElevationCostsEnum::NONE,
+                      .max_ = std::chrono::seconds{900},
+                      .max_matching_distance_ = 250.0};
+  };
+  auto const eq = cache::key_eq{};
+  auto const hash = cache::key_hash{};
+
+  auto const a = make(50.0, 8.0);
+  auto const a_ulp = make(std::nextafter(50.0, 51.0), 8.0);
+  EXPECT_TRUE(a.place_.pos_ == a_ulp.place_.pos_);  // geo::latlng: tolerant
+  EXPECT_FALSE(eq(a, a_ulp));
+
+  auto const z_pos = make(50.0, 0.0);
+  auto const z_neg = make(50.0, -0.0);
+  EXPECT_TRUE(eq(z_pos, z_neg));
+  EXPECT_EQ(hash(z_pos), hash(z_neg));
+
+  auto p_pos = a;
+  auto p_neg = a;
+  p_pos.osr_params_.pedestrian_speed_ = 0.0F;
+  p_neg.osr_params_.pedestrian_speed_ = -0.0F;
+  EXPECT_TRUE(eq(p_pos, p_neg));
+  EXPECT_EQ(hash(p_pos), hash(p_neg));
+
+  auto other_params = a;
+  other_params.osr_params_.hgv_trailer_ =
+      !other_params.osr_params_.hgv_trailer_;
+  auto other_max = a;
+  other_max.max_ = std::chrono::seconds{901};
+  auto other_level = a;
+  other_level.place_.lvl_ = osr::level_t{-1.0F};
+  EXPECT_FALSE(eq(a, other_params));
+  EXPECT_FALSE(eq(a, other_max));
+  EXPECT_FALSE(eq(a, other_level));
+
+  auto const keys =
+      std::vector<cache::key>{a,
+                              a_ulp,
+                              z_pos,
+                              z_neg,
+                              p_pos,
+                              p_neg,
+                              other_params,
+                              other_max,
+                              other_level,
+                              make(std::nextafter(50.0, 49.0), 8.0),
+                              make(50.0, std::nextafter(8.0, 9.0))};
+  for (auto const& x : keys) {
+    EXPECT_TRUE(eq(x, x));
+    for (auto const& y : keys) {
+      EXPECT_EQ(eq(x, y), eq(y, x));
+      if (eq(x, y)) {
+        EXPECT_EQ(hash(x), hash(y));
+      }
     }
   }
 }

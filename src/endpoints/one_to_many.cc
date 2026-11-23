@@ -5,6 +5,7 @@
 #include <limits>
 #include <memory>
 #include <optional>
+#include <variant>
 
 #include "utl/enumerate.h"
 #include "utl/verify.h"
@@ -16,6 +17,7 @@
 #include "nigiri/routing/one_to_all.h"
 
 #include "motis/config.h"
+#include "motis/endpoints/one_to_many_offsets_cache.h"
 #include "motis/endpoints/one_to_many_post.h"
 #include "motis/endpoints/routing.h"
 #include "motis/gbfs/routing_data.h"
@@ -174,7 +176,56 @@ std::vector<api::ParetoSet> transit_durations(
 
   auto pareto_sets = std::vector<api::ParetoSet>{};
 
-  auto const dir = arrive_by ? n::direction::kBackward : n::direction::kForward;
+  // Round arrivals are read directly (rounds 1 .. max_transfers + 1, as
+  // nigiri::routing::for_each_one_to_all_round_time does, without a
+  // std::function call per stop and round). Times are relative to the day base
+  // of the search, as in nigiri::routing::one_to_all.
+  auto const& arrivals = state.one_to_all_arrivals_;
+  auto const day_base =
+      ep.tt_.internal_interval_days().from_ +
+      static_cast<int>(std::chrono::duration_cast<date::days>(
+                           std::chrono::round<date::days>(time) -
+                           ep.tt_.internal_interval().from_)
+                           .count()) *
+          date::days{1};
+  auto const last_k = std::min(static_cast<std::size_t>(q.max_transfers_) + 1U,
+                               static_cast<std::size_t>(arrivals.n_rows_) - 1U);
+
+  // Offsets of the many places do not depend on this request's one place or
+  // time: reuse them across requests where they depend on static data only.
+  auto const many_dir =
+      arrive_by ? osr::direction::kForward : osr::direction::kBackward;
+  auto const cache_max_entries =
+      ep.config_.get_limits().onetomany_offsets_cache_max_entries_;
+  auto const use_cache = ep.offsets_cache_ != nullptr &&
+                         cache_max_entries != 0U &&
+                         one_to_many_offsets_cache::is_cacheable(
+                             many_modes, pedestrian_profile, osr_params);
+  auto const get_many_offsets = [&](place_t const& l) {
+    auto const compute = [&]() {
+      return r.get_offsets(nullptr, l, many_dir, many_modes, rental_options{},
+                           osr_params, pedestrian_profile, elevation_costs,
+                           many_max_seconds, max_matching_distance, gbfs_rd,
+                           prepare_stats);
+    };
+    auto const* pos = std::get_if<osr::location>(&l);
+    if (!use_cache || pos == nullptr) {
+      return compute();
+    }
+    return ep.offsets_cache_->get_or_compute(
+        cache_max_entries,
+        one_to_many_offsets_cache::key{
+            .place_ = *pos,
+            .dir_ = many_dir,
+            .modes_ = many_modes,
+            .osr_params_ = osr_params,
+            .pedestrian_profile_ = pedestrian_profile,
+            .elevation_costs_ = elevation_costs,
+            .max_ = many_max_seconds,
+            .max_matching_distance_ = max_matching_distance},
+        compute);
+  };
+
   // As we iterate over all offsets first, we need to store all best solutions
   // If we would iterate over k first, we could build the pareto set directly.
   // However, that would require more work for handling internals like `delta_t`
@@ -182,25 +233,22 @@ std::vector<api::ParetoSet> transit_durations(
   for (auto const [i, l] : utl::enumerate(many)) {
     totals.clear();
     totals.resize(q.max_transfers_ + 1U, kInfinity);
-    auto const offsets = r.get_offsets(
-        nullptr, l,
-        arrive_by ? osr::direction::kForward : osr::direction::kBackward,
-        many_modes, rental_options{}, osr_params, pedestrian_profile,
-        elevation_costs, many_max_seconds, max_matching_distance, gbfs_rd,
-        prepare_stats);
+    auto const offsets = get_many_offsets(l);
 
     for (auto const offset : offsets) {
       auto const loc = offset.target();
       if (reachable.test(to_idx(loc))) {
         auto const base = duration_to_seconds(offset.duration());
-        n::routing::for_each_one_to_all_round_time(
-            ep.tt_, state, dir, loc, time, q.max_transfers_,
-            [&](std::uint8_t const k, n::duration_t const d) {
-              if (k != std::uint8_t{0U}) {
-                auto const total = base + duration_to_seconds(d);
-                totals[k - 1U] = std::min(totals[k - 1], total);
-              }
-            });
+        for (auto k = std::size_t{1U}; k <= last_k; ++k) {
+          auto const v = arrivals[k][to_idx(loc)];
+          if (v == unreachable) {
+            continue;
+          }
+          auto const end_time = n::delta_to_unix(day_base, v);
+          auto const d = arrive_by ? time - end_time : end_time - time;
+          auto const total = base + duration_to_seconds(d);
+          totals[k - 1U] = std::min(totals[k - 1U], total);
+        }
       }
     }
     auto entries = api::ParetoSet{};

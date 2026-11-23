@@ -37,6 +37,7 @@
 #include "motis/constants.h"
 #include "motis/elevators/update_elevators.h"
 #include "motis/endpoints/initial.h"
+#include "motis/endpoints/one_to_many_offsets_cache.h"
 #include "motis/flex/flex_areas.h"
 #include "motis/hashes.h"
 #include "motis/match_platforms.h"
@@ -120,12 +121,16 @@ std::ostream& operator<<(std::ostream& out, data const& d) {
 data::data(std::filesystem::path p)
     : path_{std::move(p)},
       config_{config::read(path_ / "config.yml")},
-      metrics_{std::make_unique<metrics_registry>()} {}
+      metrics_{std::make_unique<metrics_registry>()},
+      one_to_many_offsets_cache_{
+          std::make_unique<ep::one_to_many_offsets_cache>()} {}
 
 data::data(std::filesystem::path p, config const& c)
     : path_{std::move(p)},
       config_{c},
-      metrics_{std::make_unique<metrics_registry>()} {
+      metrics_{std::make_unique<metrics_registry>()},
+      one_to_many_offsets_cache_{
+          std::make_unique<ep::one_to_many_offsets_cache>()} {
   auto const verify_version = [&](bool cond, char const* name, auto&& ver) {
     if (!cond) {
       return;
