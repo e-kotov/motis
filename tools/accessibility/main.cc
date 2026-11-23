@@ -1282,12 +1282,28 @@ int cmd_route(args const& a) {
   auto const reuse_state =
       a.has("reuse-state");  // experimental, see one_to_all_reuse
   auto const range = a.has("range");  // Range-RAPTOR over the departure window
-  if (range &&
-      day_base(dep_start + (dep_count - 1) * dep_step) != window_base) {
-    throw std::runtime_error(
-        "--range: the departure window spans two Nigiri day bases (round to "
-        "the nearest "
-        "UTC day changes inside the window); split the window at 12:00 UTC");
+  if (range) {
+    // Nigiri's day base is the departure rounded to the nearest UTC day
+    // (std::chrono::round: ties at exactly 12:00 UTC go to the even day
+    // number). Name the first departure whose base differs from the start's.
+    for (auto i = 0U; i != dep_count; ++i) {
+      auto const m = dep_start + static_cast<std::int64_t>(i) * dep_step;
+      if (day_base(m) != window_base) {
+        auto const t =
+            n::unixtime_t{n::i32_minutes{static_cast<std::int32_t>(m)}};
+        auto const t0 =
+            n::unixtime_t{n::i32_minutes{static_cast<std::int32_t>(dep_start)}};
+        throw std::runtime_error(fmt::format(
+            "--range: departure {} ({} UTC, unix minute {}) rounds to day {} "
+            "but the window start ({} UTC) rounds to day {}; one Range-RAPTOR "
+            "window needs one Nigiri day base, so end the window before "
+            "departure {}",
+            i, date::format("%F %R", t), m,
+            date::format("%F", std::chrono::round<std::chrono::days>(t)),
+            date::format("%F %R", t0),
+            date::format("%F", std::chrono::round<std::chrono::days>(t0)), i));
+      }
+    }
   }
   // transit (default, = stock one-to-many): egress only from rounds k >= 1.
   // all: also from round 0, i.e. walk origin->stop->destination without a

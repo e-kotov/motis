@@ -147,9 +147,12 @@ Bounds and modes:
   departure is then finished on a copy, with the strict-improvement rule and its
   own cap, and read exactly as in the default mode. The output is meant to be
   identical to one `one_to_all` per departure; check it with `vr-access compare`
-  on your data. The window must lie within one Nigiri day base: rounding the
-  departure to the nearest UTC day must not change inside it, so split at
-  12:00 UTC.
+  on your data. The window must lie within one Nigiri day base: the departure rounded to the
+  nearest UTC day (`std::chrono::round`, which sends a tie at exactly 12:00 UTC to
+  the even day number). Otherwise the tool exits 2 and names the first departure
+  whose day differs, where the next window should start. For example, a window
+  starting 2026-11-25 12:00 UTC is refused at 12:01, while windows starting at
+  12:01 that day, or at 2026-11-26 12:00, are accepted.
 - `--pin-threads` pins worker *i* to the *i*-th CPU the process may use (its
   cpuset). The timing JSON records the allowed CPUs.
 - The timing JSON records the effective `max_transfers`, `max_travel_minutes`,
