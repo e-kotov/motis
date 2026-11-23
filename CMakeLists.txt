@@ -194,6 +194,11 @@ if ("${CMAKE_CXX_COMPILER_ID}" STREQUAL "AppleClang")
     target_link_options(motis PRIVATE -Wl,-no_deduplicate)
 endif()
 
+# --- ACCESSIBILITY BATCH (offline many-origin adapter, tools/accessibility) ---
+add_executable(motis-accessibility tools/accessibility/main.cc)
+target_compile_features(motis-accessibility PUBLIC cxx_std_23)
+target_link_libraries(motis-accessibility motislib ianatzdb-res)
+
 # --- TEST ---
 add_library(motis-generated INTERFACE)
 target_include_directories(motis-generated INTERFACE ${CMAKE_CURRENT_BINARY_DIR}/generated)

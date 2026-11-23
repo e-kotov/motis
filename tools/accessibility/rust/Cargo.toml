@@ -1,0 +1,20 @@
+[package]
+name = "vr-access"
+version = "0.1.0"
+edition = "2021"
+description = "Offline accessibility reduction, comparison, connectors and oracle for the MOTIS accessibility batch"
+license = "MIT"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+csv = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+chrono = "0.4"
+chrono-tz = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+[profile.release]
+opt-level = 3
