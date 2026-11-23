@@ -122,6 +122,35 @@ def load(path, verify_checksum=True):
     return meta, sections
 
 
+ORDER = ["loc_parent", "loc_type", "loc_transfer", "loc_base", "loc_traffic", "loc_src", "loc_lat",
+         "loc_lon", "loc_id_offsets", "loc_id_bytes", "fp_begin", "fp_to", "fp_minutes", "rs_begin",
+         "rs_loc", "rs_flags", "trip_route", "trip_transport", "trip_day", "trip_first_dep",
+         "trip_last_arr", "ev_begin", "ev_arr", "ev_dep"]
+
+
+def write(path, meta, sections):
+    """Write sections (name -> sequence) as timetable.vrtt, in the exporter's layout."""
+    data_offset = HEADER.size + len(ORDER) * ENTRY.size
+    blobs, entries, offset = [], [], data_offset
+    for name in ORDER:
+        a = array.array(TYPES[name], sections[name])
+        if sys.byteorder != "little":
+            a.byteswap()
+        b = a.tobytes()
+        offset += -offset % 8
+        entries.append(ENTRY.pack(name.encode().ljust(16, b"\0"), a.itemsize, 0, offset, len(a)))
+        blobs.append((offset, b))
+        offset += len(b)
+    end = offset + (-offset % 8)
+    data = bytearray(end - data_offset)
+    for off, b in blobs:
+        data[off - data_offset:off - data_offset + len(b)] = b
+    header = HEADER.pack(b"VRTTEXP1", 1, len(ORDER), meta["from_unix_minutes"], meta["to_unix_minutes"],
+                         meta["days_from"], meta["days_to"], data_offset, fnv1a64(data))
+    with open(path, "wb") as f:
+        f.write(header + b"".join(entries) + bytes(data))
+
+
 def to_csv(s, out):
     os.makedirs(out, exist_ok=True)
     n_loc = len(s["loc_parent"])

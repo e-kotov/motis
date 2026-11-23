@@ -2,6 +2,7 @@
 """Negative tests for `vrtt.py check`.
 
     vrtt_test.py VALID.vrtt [TMP_DIR]
+    vrtt_test.py --synthetic [TMP_DIR]   (writes a small valid export with vrtt.write first)
 
 The valid file must pass. Each corrupted copy must be rejected (exit 2):
 duplicate section (replacing a required one), unknown / missing section,
@@ -87,9 +88,33 @@ def check(path):
     return r.returncode, r.stderr.strip()
 
 
+def synthetic(path):
+    """Three locations, one footpath, one route A -> C, two trips."""
+    ids = [b"A", b"B", b"C"]
+    offsets = [0]
+    for i in ids:
+        offsets.append(offsets[-1] + len(i))
+    s = {
+        "loc_parent": [-1, -1, -1], "loc_type": [1, 1, 1], "loc_transfer": [2, 2, 2], "loc_base": [0, 1, 2],
+        "loc_traffic": [1, 0, 1], "loc_src": [0, 0, 0], "loc_lat": [50.0, 50.001, 50.1], "loc_lon": [8.0, 8.0, 8.1],
+        "loc_id_offsets": offsets, "loc_id_bytes": list(b"".join(ids)),
+        "fp_begin": [0, 1, 1, 1], "fp_to": [1], "fp_minutes": [5],
+        "rs_begin": [0, 2], "rs_loc": [0, 2], "rs_flags": [3, 3],
+        "trip_route": [0, 0], "trip_transport": [0, 1], "trip_day": [0, 0],
+        "trip_first_dep": [100, 120], "trip_last_arr": [110, 130],
+        "ev_begin": [0, 2, 4], "ev_arr": [-1, 110, -1, 130], "ev_dep": [100, -1, 120, -1],
+    }
+    vrtt.write(path, dict(from_unix_minutes=90, to_unix_minutes=200, days_from=0, days_to=1), s)
+
+
 def main():
-    src = sys.argv[1]
-    tmp = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="vrtt-test-")
+    if sys.argv[1] == "--synthetic":
+        tmp = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="vrtt-test-")
+        src = os.path.join(tmp, "synthetic.vrtt")
+        synthetic(src)
+    else:
+        src = sys.argv[1]
+        tmp = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="vrtt-test-")
     ok = True
     rc, err = check(src)
     print(f"valid {src}: rc={rc} {err}")

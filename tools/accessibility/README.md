@@ -75,7 +75,8 @@ arrival overlap [A, B], with absolute UTC event times in minutes.
     CSR indexes starting at 0, monotone and ending at their payload, references
     in bounds, and per-trip event counts equal to the route length.
   - `vrtt.py to-csv FILE DIR` regenerates the CSV export byte for byte.
-  - `vrtt_test.py FILE` checks that `check` rejects corrupted copies of a valid
+  - `vrtt.write()` writes the same layout (a rewrite of an export is byte-identical).
+  - `vrtt_test.py FILE` (or `--synthetic`, a small file written with `vrtt.write`) checks that `check` rejects corrupted copies of a valid
     file: a duplicate, unknown or missing section, a reversed interval, a
     mismatched or non-monotone index array, or a flipped payload byte.
 
