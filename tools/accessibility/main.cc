@@ -362,7 +362,25 @@ int cmd_connectors(args const& a) {
   if (!r.has_value() || !r->is_osr_loaded()) {
     throw std::runtime_error("connectors require street routing (OSM) data");
   }
-  auto const points = read_points(a.str("points"));
+  // --points: coordinates (osr::location); --stop-points: CSV with a `stop` column
+  // (Nigiri location index) routed as stock tt_location places, i.e. walking offsets
+  // plus zero-cost equivalent/meta stops exactly as the stock endpoints start from a stop.
+  auto points = std::vector<motis::place_t>{};
+  if (a.has("stop-points")) {
+    auto const t = read_csv(a.str("stop-points"));
+    auto const c = t.col("stop");
+    for (auto const& r : t.rows_) {
+      auto const li = parse_num<std::uint32_t>(r.at(c));
+      if (li >= l.d_->tt_->n_locations()) {
+        throw std::runtime_error("stop-points entry out of range");
+      }
+      points.emplace_back(motis::tt_location{n::location_idx_t{li}});
+    }
+  } else {
+    for (auto const& p : read_points(a.str("points"))) {
+      points.emplace_back(osr::location{p, osr::kNoLevel});
+    }
+  }
   auto const dir_str = a.str("dir");
   if (dir_str != "forward" && dir_str != "backward") {
     throw std::runtime_error("--dir must be forward|backward");
@@ -384,9 +402,8 @@ int cmd_connectors(args const& a) {
         motis::gbfs::gbfs_routing_data{r->w_, r->l_, std::atomic_load(&r->gbfs_)};
     auto stats = std::map<std::string, std::uint64_t>{};
     for (auto i = next++; i < points.size(); i = next++) {
-      auto const p = motis::place_t{osr::location{points[i], osr::kNoLevel}};
       results[i] = r->get_offsets(
-          nullptr, p, dir, {motis::api::ModeEnum::WALK}, motis::rental_options{},
+          nullptr, points[i], dir, {motis::api::ModeEnum::WALK}, motis::rental_options{},
           params, motis::api::PedestrianProfileEnum::FOOT,
           motis::api::ElevationCostsEnum::NONE, max, max_matching, gbfs_rd,
           stats);

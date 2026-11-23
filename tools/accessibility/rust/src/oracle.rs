@@ -68,6 +68,13 @@ pub struct OracleArgs {
     max_travel: u16,
     #[arg(long)]
     out: PathBuf,
+    /// write the active-stop list (stops with >= 1 boardable departure in
+    /// [first departure, last departure + max travel]) as CSV `stop,departures`
+    #[arg(long)]
+    active_stops_out: Option<PathBuf>,
+    /// explain cells "origin:departure_index:dest[,..]" (dests target): witness journey
+    #[arg(long, value_delimiter = ',')]
+    explain: Vec<String>,
 }
 
 struct Gtfs {
@@ -236,6 +243,7 @@ pub fn run(a: OracleArgs) -> Result<()> {
     let hi = a.dep_start_unix_minutes + (a.dep_count - 1) * a.dep_step + a.max_travel as i64;
     let mut conns: Vec<Conn> = Vec::new();
     let mut n_trip_inst = 0u32;
+    let mut inst_names: Vec<(String, u32)> = Vec::new();
     let mut skipped_missing_times = 0u64;
     let mut blocks: HashMap<(String, usize), Vec<(i64, u32)>> = HashMap::new();
     let mut trip_ids: Vec<String> = by_trip.keys().cloned().collect();
@@ -261,6 +269,7 @@ pub fn run(a: OracleArgs) -> Result<()> {
             }
             let inst = n_trip_inst;
             n_trip_inst += 1;
+            inst_names.push((format!("{}@{}", tidk, days[k]), inst));
             if let Some(bk) = blk {
                 blocks.entry((bk.clone(), k)).or_default().push((first, inst));
             }
@@ -287,6 +296,43 @@ pub fn run(a: OracleArgs) -> Result<()> {
     }
     conns.sort_by_key(|c| (c.dep, c.arr));
     let prep_s = t0.elapsed().as_secs_f64();
+    if let Some(p) = &a.active_stops_out {
+        let mut cnt = vec![0u64; n_loc];
+        for c in &conns {
+            if c.pickup && c.dep >= lo && c.dep <= hi {
+                cnt[c.from as usize] += 1;
+            }
+        }
+        let mut w = std::io::BufWriter::new(std::fs::File::create(p)?);
+        use std::io::Write as _;
+        writeln!(w, "stop,departures")?;
+        let mut n_act = 0;
+        for (s, &k) in cnt.iter().enumerate() {
+            if k > 0 {
+                writeln!(w, "{},{}", s, k)?;
+                n_act += 1;
+            }
+        }
+        w.flush()?;
+        eprintln!("active stops: {} of {} locations have a boardable departure in [{}, {}]", n_act, n_loc, crate::motis_batch::iso(lo), crate::motis_batch::iso(hi));
+    }
+    let trip_name: Vec<String> = {
+        // trip instance -> GTFS trip_id (for explanations)
+        let mut v = vec![String::new(); n_trip_inst as usize];
+        for (name, inst) in &inst_names {
+            v[*inst as usize] = name.clone();
+        }
+        v
+    };
+    let explain: Vec<(u32, usize, u32)> = a
+        .explain
+        .iter()
+        .map(|x| {
+            let p: Vec<&str> = x.split(':').collect();
+            Ok((p[0].parse()?, p[1].parse()?, p[2].parse()?))
+        })
+        .collect::<Result<_>>()?;
+    let mut explanations = Vec::new();
 
     let access = read_connectors(&a.access)?;
     let mut acc: Vec<Vec<(u32, i64)>> = vec![vec![]; a.n_origins as usize];
@@ -326,6 +372,10 @@ pub fn run(a: OracleArgs) -> Result<()> {
     let mut arr_t = vec![INF; n_loc];
     let mut arr0 = vec![INF; n_loc];
     let mut boarded = vec![false; n_trip_inst as usize];
+    // witness bookkeeping: how each stop's transit arrival / readiness was set
+    let mut arr_src = vec![(u32::MAX, u32::MAX); n_loc]; // (connection idx, via footpath from stop)
+    let mut ready_src = vec![u32::MAX; n_loc]; // connection idx (u32::MAX = access walk)
+    let mut board = vec![(u32::MAX, 0i64); n_trip_inst as usize]; // (boarding stop, time)
     let t1 = std::time::Instant::now();
     let mut scanned = 0u64;
     for &o in &a.sample {
@@ -335,12 +385,14 @@ pub fn run(a: OracleArgs) -> Result<()> {
             arr_t.iter_mut().for_each(|x| *x = INF);
             arr0.iter_mut().for_each(|x| *x = INF);
             boarded.iter_mut().for_each(|x| *x = false);
+            let want = explain.iter().any(|e| e.0 == o && e.1 == di);
             for &(s, m) in &acc[o as usize] {
                 ready[s as usize] = ready[s as usize].min(t + m);
                 arr0[s as usize] = arr0[s as usize].min(t + m);
             }
             let start = conns.partition_point(|c| c.dep < t);
-            for c in &conns[start..] {
+            for (ci, c) in conns[start..].iter().enumerate() {
+                let ci = (start + ci) as u32;
                 if c.dep > t + cap {
                     break;
                 }
@@ -349,6 +401,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 if !boarded[ti] {
                     if c.pickup && ready[c.from as usize] <= c.dep {
                         boarded[ti] = true;
+                        if want {
+                            board[ti] = (c.from, c.dep);
+                        }
                     } else {
                         continue;
                     }
@@ -362,21 +417,73 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 let to = c.to as usize;
                 if c.arr < arr_t[to] {
                     arr_t[to] = c.arr;
+                    if want {
+                        arr_src[to] = (ci, u32::MAX);
+                    }
                 }
                 let r = c.arr + transfer_time[to];
                 if r < ready[to] {
                     ready[to] = r;
+                    if want {
+                        ready_src[to] = ci;
+                    }
                 }
                 for &(f, d) in &fps[to] {
                     let x = c.arr + d;
                     if x - t <= cap {
                         if x < arr_t[f as usize] {
                             arr_t[f as usize] = x;
+                            if want {
+                                arr_src[f as usize] = (ci, c.to);
+                            }
                         }
                         if x < ready[f as usize] {
                             ready[f as usize] = x;
+                            if want {
+                                ready_src[f as usize] = ci;
+                            }
                         }
                     }
+                }
+            }
+            if want && !to_stops {
+                for &(eo, edi, ed) in explain.iter().filter(|e| e.0 == o && e.1 == di) {
+                    // best egress stop under each semantics
+                    let mut best: Vec<serde_json::Value> = Vec::new();
+                    for s in 0..n_loc {
+                        for &(d, e) in &egr[s] {
+                            if d != ed || arr_t[s] >= INF || arr_t[s] - t + e > cap {
+                                continue;
+                            }
+                            let total = arr_t[s] - t + e;
+                            let (cidx, via) = arr_src[s];
+                            let c = &conns[cidx as usize];
+                            // walk back the vehicle legs
+                            let mut legs = Vec::new();
+                            let mut cur = cidx;
+                            for _ in 0..16 {
+                                let cc = &conns[cur as usize];
+                                let (bs, bt) = board[cc.trip as usize];
+                                legs.push(serde_json::json!({"trip": trip_name[cc.trip as usize], "board_stop": bs, "board_time": crate::motis_batch::iso(bt), "alight_stop": cc.to, "alight_time": crate::motis_batch::iso(cc.arr)}));
+                                if bs == u32::MAX || ready_src[bs as usize] == u32::MAX {
+                                    let acc_m = acc[o as usize].iter().find(|x| x.0 == bs).map(|x| x.1);
+                                    legs.push(serde_json::json!({"access_walk_to": bs, "access_minutes": acc_m}));
+                                    break;
+                                }
+                                cur = ready_src[bs as usize];
+                            }
+                            legs.reverse();
+                            best.push(serde_json::json!({
+                                "egress_stop": s, "transit_arrival_min": arr_t[s] - t, "access_walk_arrival_min": if arr0[s] < INF { Some(arr0[s] - t) } else { None },
+                                "kept_by_stock": arr_t[s] < arr0[s], "egress_min": e, "total": total,
+                                "last_footpath_from": if via == u32::MAX { None } else { Some(via) }, "last_alight": c.to, "legs": legs,
+                            }));
+                        }
+                    }
+                    best.sort_by_key(|v| v["total"].as_i64().unwrap_or(i64::MAX));
+                    best.truncate(3);
+                    let direct = dir[eo as usize].iter().find(|x| x.0 == ed).map(|x| x.1);
+                    explanations.push(serde_json::json!({"origin": eo, "departure_index": edi, "departure": crate::motis_batch::iso(t), "dest": ed, "direct_walk_min": direct, "best_transit_options": best}));
                 }
             }
             let row = &mut rec.tt[di * n_dests as usize..(di + 1) * n_dests as usize];
@@ -433,6 +540,7 @@ pub fn run(a: OracleArgs) -> Result<()> {
             "connections_scanned": scanned,
             "prepare_seconds": prep_s,
             "scan_seconds": t1.elapsed().as_secs_f64(),
+            "explanations": explanations,
         }))?
     );
     Ok(())

@@ -3,6 +3,7 @@ mod geo;
 mod motis_batch;
 mod oracle;
 mod reduce;
+mod stops_mode;
 mod stream;
 
 use anyhow::{bail, Context, Result};
@@ -180,6 +181,65 @@ enum Cmd {
         #[arg(long)]
         stream: PathBuf,
     },
+    /// Station-to-station summary of a stops stream (per origin x departure): reachable
+    /// active stops (denominator = --active list), their travel-time sum and a digest.
+    StopSummary {
+        #[arg(long)]
+        stream: PathBuf,
+        /// CSV with a `stop` column (e.g. `oracle --active-stops-out`)
+        #[arg(long)]
+        active: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Stock control for stop origins: `motis batch` queries for /api/v6/one-to-all.
+    MotisOneToAllQueries {
+        #[arg(long)]
+        stops: PathBuf,
+        /// CSV with a `stop` column; row order = origin index
+        #[arg(long)]
+        origins: PathBuf,
+        /// dataset tag used at import (stop ids are "<tag>_<gtfs id>")
+        #[arg(long)]
+        tag: String,
+        #[arg(long)]
+        dep_start_unix_minutes: i64,
+        #[arg(long, default_value_t = 1)]
+        dep_count: i64,
+        #[arg(long, default_value_t = 1)]
+        dep_step: i64,
+        #[arg(long)]
+        max_travel: u16,
+        #[arg(long, default_value_t = 0)]
+        pre_seconds: u32,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        map: PathBuf,
+    },
+    /// Convert stock one-to-all responses to a stops stream.
+    FromMotisOneToAll {
+        #[arg(long)]
+        map: PathBuf,
+        #[arg(long)]
+        responses: PathBuf,
+        #[arg(long)]
+        stops: PathBuf,
+        #[arg(long)]
+        tag: String,
+        #[arg(long)]
+        n_origins: u32,
+        #[arg(long)]
+        dep_start_unix_minutes: i64,
+        #[arg(long, default_value_t = 1)]
+        dep_count: i64,
+        #[arg(long, default_value_t = 1)]
+        dep_step: i64,
+        #[arg(long)]
+        max_travel: u16,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Print a stream header and per-departure reachability counts.
     Inspect {
         #[arg(long)]
@@ -341,6 +401,20 @@ fn main() -> Result<()> {
         }
         Cmd::FromMotisBatch { map, responses, n_origins, n_dests, dep_start_unix_minutes, dep_count, dep_step, max_travel, out } => {
             let info = motis_batch::convert_responses(&map, &responses, n_origins, n_dests, &departures(dep_start_unix_minutes, dep_count, dep_step), max_travel, &out)?;
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        }
+        Cmd::StopSummary { stream, active, out } => {
+            let act = stops_mode::read_stop_list(&active)?;
+            let info = stops_mode::stop_summary(&stream, &act, &out)?;
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        }
+        Cmd::MotisOneToAllQueries { stops, origins, tag, dep_start_unix_minutes, dep_count, dep_step, max_travel, pre_seconds, out, map } => {
+            let o = stops_mode::read_stop_list(&origins)?;
+            let n = stops_mode::one_to_all_queries(&stops, &o, &tag, &departures(dep_start_unix_minutes, dep_count, dep_step), max_travel, pre_seconds, &out, &map)?;
+            eprintln!("motis-one-to-all-queries: {} queries", n);
+        }
+        Cmd::FromMotisOneToAll { map, responses, stops, tag, n_origins, dep_start_unix_minutes, dep_count, dep_step, max_travel, out } => {
+            let info = stops_mode::from_one_to_all(&map, &responses, &stops, &tag, n_origins, &departures(dep_start_unix_minutes, dep_count, dep_step), max_travel, &out)?;
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
         Cmd::Dump { stream } => {
