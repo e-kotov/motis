@@ -706,7 +706,7 @@ n::routing::raptor_state const& one_to_all_reuse(n::timetable const& tt,
   auto const worst_time_at_dest = start_time + q.max_travel_time_;
   auto const worst_at_dest = ra.to_delta(worst_time_at_dest);
   auto const t1 = clock_t_::now();
-  auto results = r::pareto_set<r::journey>{};
+  auto results = n::pareto_set<r::journey>{};
   ra.next_start_time();
   for (auto const& s : q.start_) {
     auto const t = start_time + s.duration();
