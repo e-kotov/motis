@@ -22,8 +22,9 @@
 //! - Unlimited transfers (CSA); Nigiri stops at kMaxTransfers = 14.
 //! - GTFS transfers.txt `transfer_type=3` trip-to-trip rules (from_trip, to_trip,
 //!   from_stop, to_stop) forbid boarding the to-trip with readiness that came from the
-//!   from-trip alighting at from_stop; readiness is kept per stop as up to 6 labels with
-//!   distinct source trips (overflow is counted). Other transfer types are not modelled.
+//!   from-trip alighting at from_stop. Readiness is tracked exactly (eligibility-aware:
+//!   one universal label plus every restricted (trip, alighting stop) label not dominated
+//!   by it; no cap). Other transfer types are not modelled.
 
 use crate::geo::{read_connectors, Table};
 use crate::stream::{Header, Record, Writer, DIRECT_WALK, UNREACHABLE};
@@ -426,31 +427,46 @@ pub fn run(a: OracleArgs) -> Result<()> {
     let mut arr_src = vec![(u32::MAX, u32::MAX); n_loc]; // (connection idx, via footpath from stop)
     let mut ready_src = vec![u32::MAX; n_loc]; // connection idx (u32::MAX = access walk)
     let mut board = vec![(u32::MAX, 0i64); n_trip_inst as usize]; // (boarding stop, time)
-    // readiness labels (time, source trip instance or MAX for access, alight stop) per stop,
-    // only used when forbidden trip-to-trip transfers exist
-    const K: usize = 6;
+    // Exact eligibility-aware readiness (only when forbidden trip-to-trip rules exist).
+    // A readiness label at boarding stop Y comes from (source trip A, alighting stop X) or
+    // from the access walk. Its eligibility for an onward trip B depends only on whether
+    // (A, B, X, Y) is forbidden. Labels whose (A, X, Y) appears in no rule are eligible for
+    // every B ("universal"): only the earliest universal label per stop matters. Restricted
+    // labels are kept per distinct (trip instance, X) without any cap, and dropped only
+    // when an equal-or-earlier universal label dominates them. This is exact (no bounded
+    // label set; earlier versions kept <= 6 labels per stop and merged labels by source
+    // trip across different alighting stops, which could miss a legal boarding).
     let use_labels = !forb.is_empty();
-    let mut labels: Vec<Vec<(i64, u32, u32)>> = vec![Vec::new(); if use_labels { n_loc } else { 0 }];
+    let restricted: std::collections::HashSet<(u32, u32, u32)> = forb.iter().map(|&(a_, _, x, y)| (a_, x, y)).collect();
+    let mut uni = vec![INF; if use_labels { n_loc } else { 0 }];
+    let mut res: Vec<Vec<(i64, u32, u32)>> = vec![Vec::new(); if use_labels { n_loc } else { 0 }];
     let mut touched: Vec<u32> = Vec::new();
-    let mut label_overflow = 0u64;
+    let mut max_restricted = 0usize;
+    let mut restricted_inserts = 0u64;
     let mut forbidden_hits = 0u64;
-    let add_label = |labels: &mut Vec<Vec<(i64, u32, u32)>>, touched: &mut Vec<u32>, overflow: &mut u64, st: usize, l: (i64, u32, u32)| {
-        let v = &mut labels[st];
-        if v.is_empty() {
-            touched.push(st as u32);
+    let add_label = |uni: &mut Vec<i64>, res: &mut Vec<Vec<(i64, u32, u32)>>, touched: &mut Vec<u32>, max_r: &mut usize, ins: &mut u64, y: usize, t: i64, src: u32, x: u32| {
+        if uni[y] == INF && res[y].is_empty() {
+            touched.push(y as u32);
         }
-        if let Some(e) = v.iter_mut().find(|e| e.1 == l.1) {
-            if l.0 < e.0 {
-                *e = l;
+        let is_restricted = src != u32::MAX && restricted.contains(&(inst_gtfs[src as usize], x, y as u32));
+        if !is_restricted {
+            if t < uni[y] {
+                uni[y] = t;
             }
-        } else if v.len() < K {
-            v.push(l);
+            return;
+        }
+        if t >= uni[y] {
+            return; // dominated by an equal-or-earlier universal label
+        }
+        *ins += 1;
+        let v = &mut res[y];
+        if let Some(e) = v.iter_mut().find(|e| e.1 == src && e.2 == x) {
+            if t < e.0 {
+                e.0 = t;
+            }
         } else {
-            *overflow += 1;
-            let (wi, wt) = v.iter().enumerate().max_by_key(|(_, e)| e.0).map(|(i, e)| (i, e.0)).unwrap();
-            if l.0 < wt {
-                v[wi] = l;
-            }
+            v.push((t, src, x));
+            *max_r = (*max_r).max(v.len());
         }
     };
     let t1 = std::time::Instant::now();
@@ -463,7 +479,8 @@ pub fn run(a: OracleArgs) -> Result<()> {
             arr0.iter_mut().for_each(|x| *x = INF);
             boarded.iter_mut().for_each(|x| *x = false);
             for &st in &touched {
-                labels[st as usize].clear();
+                uni[st as usize] = INF;
+                res[st as usize].clear();
             }
             touched.clear();
             let want = explain.iter().any(|e| e.0 == o && e.1 == di);
@@ -471,7 +488,7 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 ready[s as usize] = ready[s as usize].min(t + m);
                 arr0[s as usize] = arr0[s as usize].min(t + m);
                 if use_labels {
-                    add_label(&mut labels, &mut touched, &mut label_overflow, s as usize, (t + m, u32::MAX, u32::MAX));
+                    add_label(&mut uni, &mut res, &mut touched, &mut max_restricted, &mut restricted_inserts, s as usize, t + m, u32::MAX, u32::MAX);
                 }
             }
             let start = conns.partition_point(|c| c.dep < t);
@@ -486,8 +503,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
                     let ok = c.pickup
                         && ready[c.from as usize] <= c.dep
                         && (!use_labels
-                            || labels[c.from as usize].iter().any(|&(lt, src, x)| {
-                                lt <= c.dep && (src == u32::MAX || !forb.contains(&(inst_gtfs[src as usize], inst_gtfs[ti], x, c.from)))
+                            || uni[c.from as usize] <= c.dep
+                            || res[c.from as usize].iter().any(|&(lt, src, x)| {
+                                lt <= c.dep && lt < uni[c.from as usize] && !forb.contains(&(inst_gtfs[src as usize], inst_gtfs[ti], x, c.from))
                             }));
                     if use_labels && c.pickup && ready[c.from as usize] <= c.dep && !ok {
                         forbidden_hits += 1;
@@ -516,7 +534,7 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 }
                 let r = c.arr + transfer_time[to];
                 if use_labels {
-                    add_label(&mut labels, &mut touched, &mut label_overflow, to, (r, c.trip, c.to));
+                    add_label(&mut uni, &mut res, &mut touched, &mut max_restricted, &mut restricted_inserts, to, r, c.trip, c.to);
                 }
                 if r < ready[to] {
                     ready[to] = r;
@@ -527,7 +545,7 @@ pub fn run(a: OracleArgs) -> Result<()> {
                 for &(f, d) in &fps[to] {
                     let x = c.arr + d;
                     if use_labels && x - t <= cap {
-                        add_label(&mut labels, &mut touched, &mut label_overflow, f as usize, (x, c.trip, c.to));
+                        add_label(&mut uni, &mut res, &mut touched, &mut max_restricted, &mut restricted_inserts, f as usize, x, c.trip, c.to);
                     }
                     if x - t <= cap {
                         if x < arr_t[f as usize] {
@@ -642,7 +660,9 @@ pub fn run(a: OracleArgs) -> Result<()> {
             "explanations": explanations,
             "forbidden_transfer_rules": forb.len(),
             "boardings_blocked_by_rules": forbidden_hits,
-            "readiness_label_overflow": label_overflow,
+            "readiness_mode": if use_labels { "exact-eligibility-aware" } else { "single-label (no forbidden rules)" },
+            "restricted_label_inserts": restricted_inserts,
+            "max_restricted_labels_per_stop": max_restricted,
             "footpaths_skipped_virtual": skipped_virtual_fp,
         }))?
     );
