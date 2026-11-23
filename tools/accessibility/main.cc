@@ -38,7 +38,9 @@
 #include "osr/location.h"
 #include "osr/routing/profile.h"
 
+#include "nigiri/for_each_meta.h"
 #include "nigiri/location_routes.h"
+#include "nigiri/routing/raptor/raptor.h"
 #include "nigiri/routing/limits.h"
 #include "nigiri/routing/one_to_all.h"
 #include "nigiri/routing/query.h"
@@ -648,6 +650,96 @@ int cmd_direct(args const& a) {
   return 0;
 }
 
+// ------------------------------------------- one_to_all with reused state
+// Experimental (--reuse-state): the body of nigiri::routing::one_to_all
+// (7575542b src/routing/one_to_all.cc, forward, no RT) with a caller-owned
+// raptor_state and lower-bound / destination vectors reused per worker. The raptor
+// constructor resizes (no-op after the first query) and resets all arrival arrays,
+// and next_start_time() resets best/tmp/marks, so every query starts from a fresh
+// state. Stock semantics and all kMaxTransfers + 2 rounds are unchanged.
+struct reuse_ctx {
+  n::routing::raptor_state state_;
+  n::bitvec is_dest_;
+  std::array<n::bitvec, n::routing::kMaxVias> is_via_;
+  std::vector<std::uint16_t> dist_to_dest_;
+  std::vector<std::uint16_t> lb_;
+  std::uint64_t init_ns_{}, scan_ns_{}, finish_ns_{};
+};
+
+n::routing::raptor_state const& one_to_all_reuse(n::timetable const& tt,
+                                                 n::routing::query const& q,
+                                                 reuse_ctx& c) {
+  namespace r = n::routing;
+  constexpr auto kVias = n::via_offset_t{0U};
+  auto const ns = [](auto const a, auto const b) {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
+  };
+  auto const t0 = clock_t_::now();
+  auto const start_time = std::get<n::unixtime_t>(q.start_time_);
+  if (c.is_dest_.size() != tt.n_locations()) {
+    c.is_dest_ = n::bitvec{tt.n_locations()};
+    c.lb_.assign(tt.n_locations(), 0U);
+  }
+  auto const base = n::day_idx_t{std::chrono::duration_cast<date::days>(
+                                     std::chrono::round<std::chrono::days>(start_time) -
+                                     tt.internal_interval().from_)
+                                     .count()};
+  auto ra = r::raptor<n::direction::kForward, false, kVias, r::search_mode::kOneToAll>{
+      tt,
+      nullptr,
+      c.state_,
+      c.is_dest_,
+      c.is_via_,
+      c.dist_to_dest_,
+      q.td_dest_,
+      c.lb_,
+      q.via_stops_,
+      base,
+      q.allowed_claszes_,
+      q.require_bike_transport_,
+      q.require_car_transport_,
+      q.prf_idx_ == n::kWheelchairProfile,
+      q.no_compulsory_reservation_,
+      q.transfer_time_settings_,
+      q.prf_idx_};
+  auto const worst_time_at_dest = start_time + q.max_travel_time_;
+  auto const worst_at_dest = ra.to_delta(worst_time_at_dest);
+  auto const t1 = clock_t_::now();
+  auto results = r::pareto_set<r::journey>{};
+  ra.next_start_time();
+  for (auto const& s : q.start_) {
+    auto const t = start_time + s.duration();
+    r::for_each_meta(tt, r::rt_virts(nullptr, q.prf_idx_), q.start_match_mode_,
+                     s.target(), [&](n::location_idx_t const l) { ra.add_start(l, t); });
+  }
+  auto worst = std::array<n::unixtime_t, r::kMaxTransfers + 2U>{};
+  worst.fill(worst_time_at_dest);
+  ra.execute(start_time, q.max_transfers_, worst, results);
+  auto const t2 = clock_t_::now();
+  // finish_one_to_all (forward)
+  constexpr auto kInvalid = n::kInvalidDelta<n::direction::kForward>;
+  auto best = c.state_.get_best<kVias>();
+  auto& arrivals = c.state_.one_to_all_arrivals_;
+  for (auto l = n::location_idx_t{0U}; l != c.state_.n_locations_; ++l) {
+    auto& b = best[to_idx(l)][kVias];
+    b = kInvalid;
+    for (auto k = 0U; k != r::kMaxTransfers + 2U; ++k) {
+      auto& t = arrivals[k][to_idx(l)];
+      if (t < b && !(worst_at_dest < t)) {
+        b = t;
+      } else {
+        t = kInvalid;
+      }
+    }
+  }
+  auto const t3 = clock_t_::now();
+  c.init_ns_ += ns(t0, t1);
+  c.scan_ns_ += ns(t1, t2);
+  c.finish_ns_ += ns(t2, t3);
+  return c.state_;
+}
+
 // ---------------------------------------------------------------- route
 struct stream_header {
   char magic_[8]{'V', 'R', 'T', 'T', 'M', 'A', 'T', 'X'};
@@ -724,6 +816,7 @@ int cmd_route(args const& a) {
   }
   auto const max_transfers = static_cast<std::uint8_t>(max_transfers_arg);
   auto const with_transfers = a.has("with-transfers");
+  auto const reuse_state = a.has("reuse-state");  // experimental, see one_to_all_reuse
   // transit (default, = stock one-to-many): egress only from rounds k >= 1.
   // all: also from round 0, i.e. walk origin->stop->destination without a vehicle.
   auto const egress_rounds = a.str("egress-rounds", "transit");
@@ -794,12 +887,16 @@ int cmd_route(args const& a) {
   auto kernel_ns = std::atomic_uint64_t{0U};
   auto reduce_ns = std::atomic_uint64_t{0U};
   auto write_ns = std::atomic_uint64_t{0U};
+  auto reuse_init_ns = std::atomic_uint64_t{0U};
+  auto reuse_scan_ns = std::atomic_uint64_t{0U};
+  auto reuse_finish_ns = std::atomic_uint64_t{0U};
   auto const t_route = clock_t_::now();
 
   // The travel-time buffer uses the narrowest record type (u8 for caps <= 253, else
   // u16): the egress loop is memory-bound and a u16 buffer slowed it by ~70 %.
   auto worker_t = [&](auto const type_tag) {
     using tt_t = std::decay_t<decltype(type_tag)>;
+    auto rctx = reuse_ctx{};
     constexpr auto kUnreachableT = std::numeric_limits<tt_t>::max();
     auto const block = static_cast<std::size_t>(dep_count) * n_dests;
     auto tt_buf = std::vector<tt_t>(block);
@@ -850,8 +947,10 @@ int cmd_route(args const& a) {
             .allowed_claszes_ = clasz_mask,
         };
         auto const tk = clock_t_::now();
-        auto const state = n::routing::one_to_all<n::direction::kForward>(
-            tt, nullptr, q);
+        auto const fresh = reuse_state
+                               ? n::routing::raptor_state{}
+                               : n::routing::one_to_all<n::direction::kForward>(tt, nullptr, q);
+        auto const& state = reuse_state ? one_to_all_reuse(tt, q, rctx) : fresh;
         auto const tr = clock_t_::now();
         kernel_ns += static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(tr - tk).count());
@@ -950,6 +1049,9 @@ int cmd_route(args const& a) {
           std::chrono::duration_cast<std::chrono::nanoseconds>(clock_t_::now() - tw)
               .count());
     }
+    reuse_init_ns += rctx.init_ns_;
+    reuse_scan_ns += rctx.scan_ns_;
+    reuse_finish_ns += rctx.finish_ns_;
   };
   auto worker = [&]() {
     if (tt16) {
@@ -976,12 +1078,14 @@ int cmd_route(args const& a) {
       "\"threads\":{},\"discard\":{},\"max_travel_minutes\":{},\"max_transfers\":{},\"queries\":{},\"load_ms\":{:.3f},\"connectors_ms\":{:.3f},"
       "\"route_wall_ms\":{:.3f},\"kernel_thread_ms\":{:.3f},"
       "\"reduce_thread_ms\":{:.3f},\"write_thread_ms\":{:.3f},"
-      "\"peak_rss_kb\":{},\"n_locations\":{}}}",
+      "\"peak_rss_kb\":{},\"n_locations\":{},\"reuse_state\":{},"
+      "\"reuse_init_thread_ms\":{:.3f},\"reuse_scan_thread_ms\":{:.3f},\"reuse_finish_thread_ms\":{:.3f}}}",
       kFormatVersion, target_stops ? "stops" : "dests", egress_rounds, origin_from, origin_to,
       n_dests, dep_count, n_threads, discard, max_travel,
       static_cast<int>(max_transfers), n_queries.load(), l.load_ms_, conn_ms,
       route_ms, kernel_ns.load() / 1e6, reduce_ns.load() / 1e6,
-      write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations());
+      write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations(), reuse_state,
+      reuse_init_ns.load() / 1e6, reuse_scan_ns.load() / 1e6, reuse_finish_ns.load() / 1e6);
   if (!timing_path.empty()) {
     auto tj = std::ofstream{timing_path};
     tj << json << '\n';
