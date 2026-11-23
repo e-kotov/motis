@@ -364,6 +364,130 @@ int cmd_stops(args const& a) {
   return 0;
 }
 
+// ------------------------------------------------ numeric timetable export
+// Exports exactly what the pinned Nigiri RAPTOR scans (profile 0, scheduled
+// timetable): locations with base/parent mapping and transfer times, the
+// directed footpath graph, route stop sequences with boarding/alighting flags,
+// and every transport instance (transport, day) overlapping [from, to] with
+// absolute UTC event times in minutes. Block / stay-seated trips are already
+// merged into one transport by the loader.
+int cmd_export_tt(args const& a) {
+  auto const l = loaded{a.str("data")};
+  auto const& tt = *l.d_->tt_;
+  auto const from = a.integer("from-unix-minutes");
+  auto const to = a.integer("to-unix-minutes");
+  auto const dir = fs::path{a.str("out")};
+  a.check_all_used();
+  if (to < from) {
+    throw std::runtime_error("to < from");
+  }
+  if (fs::exists(dir)) {
+    throw std::runtime_error(fmt::format("refusing to overwrite {}", dir.string()));
+  }
+  fs::create_directories(dir);
+  {
+    auto out = std::ofstream{dir / "locations.csv"};
+    out << "loc,id,src,lat,lon,parent,type,transfer_time,base,traffic\n";
+    for (auto i = 0U; i != tt.n_locations(); ++i) {
+      auto const x = n::location_idx_t{i};
+      auto const parent = tt.locations_.parents_[x];
+      out << i << ',' << std::string_view{tt.locations_.ids_[x].view()} << ','
+          << to_idx(tt.locations_.src_[x]) << ','
+          << fmt::format("{:.7f},{:.7f}", tt.locations_.coordinates_[x].lat_,
+                         tt.locations_.coordinates_[x].lng_)
+          << ','
+          << (parent == n::location_idx_t::invalid()
+                  ? std::string{"-1"}
+                  : std::to_string(to_idx(parent)))
+          << ',' << static_cast<int>(tt.locations_.types_[x]) << ','
+          << static_cast<int>(tt.locations_.transfer_time_[x].count()) << ','
+          << to_idx(tt.locations_.get_base_idx(x)) << ','
+          << (n::any_route_at(tt, x) ? 1 : 0) << '\n';
+    }
+  }
+  auto n_fp = std::size_t{0U};
+  {
+    auto out = std::ofstream{dir / "footpaths.csv"};
+    out << "from,to,minutes\n";
+    for (auto i = 0U; i != tt.n_locations(); ++i) {
+      for (auto const& f : tt.locations_.footpaths_out_[0][n::location_idx_t{i}]) {
+        out << i << ',' << to_idx(f.target()) << ',' << f.duration().count() << '\n';
+        ++n_fp;
+      }
+    }
+  }
+  auto n_route_stops = std::size_t{0U};
+  {
+    auto out = std::ofstream{dir / "route_stops.csv"};
+    out << "route,seq,loc,in_allowed,out_allowed\n";
+    for (auto r = 0U; r != tt.n_routes(); ++r) {
+      auto const seq = tt.route_location_seq_[n::route_idx_t{r}];
+      for (auto i = 0U; i != seq.size(); ++i) {
+        auto const st = n::stop{seq[i]};
+        out << r << ',' << i << ',' << to_idx(st.location_idx()) << ','
+            << (st.in_allowed() ? 1 : 0) << ',' << (st.out_allowed() ? 1 : 0) << '\n';
+        ++n_route_stops;
+      }
+    }
+  }
+  auto n_trips = std::size_t{0U};
+  auto n_events = std::size_t{0U};
+  {
+    auto trips = std::ofstream{dir / "trips.csv"};
+    auto events = std::ofstream{dir / "events.csv"};
+    trips << "trip,route,transport,day,first_dep,last_arr\n";
+    events << "trip,seq,arr,dep\n";
+    auto const n_days = static_cast<std::uint32_t>(
+        (tt.internal_interval_days().to_ - tt.internal_interval_days().from_).count());
+    auto const minutes = [](n::unixtime_t const t) {
+      return static_cast<std::int64_t>(t.time_since_epoch().count());
+    };
+    for (auto r = 0U; r != tt.n_routes(); ++r) {
+      auto const ri = n::route_idx_t{r};
+      auto const n_stops = static_cast<n::stop_idx_t>(tt.route_location_seq_[ri].size());
+      for (auto const t : tt.route_transport_ranges_[ri]) {
+        for (auto d = 0U; d != n_days; ++d) {
+          auto const day = n::day_idx_t{d};
+          if (!tt.is_transport_active(t, day)) {
+            continue;
+          }
+          auto const tr = n::transport{t, day};
+          auto const first = minutes(tt.event_time(tr, 0U, n::event_type::kDep));
+          auto const last = minutes(tt.event_time(
+              tr, static_cast<n::stop_idx_t>(n_stops - 1U), n::event_type::kArr));
+          if (last < from || first > to) {
+            continue;
+          }
+          trips << n_trips << ',' << r << ',' << to_idx(t) << ',' << d << ',' << first
+                << ',' << last << '\n';
+          for (auto i = n::stop_idx_t{0U}; i != n_stops; ++i) {
+            auto const arr = i == 0U ? std::int64_t{-1}
+                                     : minutes(tt.event_time(tr, i, n::event_type::kArr));
+            auto const dep = i == n_stops - 1U
+                                 ? std::int64_t{-1}
+                                 : minutes(tt.event_time(tr, i, n::event_type::kDep));
+            events << n_trips << ',' << i << ',' << arr << ',' << dep << '\n';
+            ++n_events;
+          }
+          ++n_trips;
+        }
+      }
+    }
+  }
+  auto meta = std::ofstream{dir / "export.json"};
+  meta << fmt::format(
+      "{{\"tool\":\"motis-accessibility export-tt\",\"schema\":1,\"from_unix_minutes\":{},"
+      "\"to_unix_minutes\":{},\"n_locations\":{},\"n_routes\":{},\"n_route_stops\":{},"
+      "\"n_footpaths\":{},\"n_trips\":{},\"n_events\":{},\"profile\":0,"
+      "\"internal_interval_days\":[{},{}]}}\n",
+      from, to, tt.n_locations(), tt.n_routes(), n_route_stops, n_fp, n_trips, n_events,
+      tt.internal_interval_days().from_.time_since_epoch().count(),
+      tt.internal_interval_days().to_.time_since_epoch().count());
+  fmt::println(stderr, "export-tt: routes={} trips={} events={} footpaths={} load_ms={:.1f}",
+               tt.n_routes(), n_trips, n_events, n_fp, l.load_ms_);
+  return 0;
+}
+
 // ------------------------------------------------- OSR connectors (stock)
 int cmd_connectors(args const& a) {
   auto const l = loaded{a.str("data")};
@@ -880,6 +1004,8 @@ int main(int ac, char** av) {
     auto const a = args{ac, av};
     if (cmd == "stops") {
       return cmd_stops(a);
+    } else if (cmd == "export-tt") {
+      return cmd_export_tt(a);
     } else if (cmd == "connectors") {
       return cmd_connectors(a);
     } else if (cmd == "direct") {
