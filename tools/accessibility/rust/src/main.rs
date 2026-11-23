@@ -2,6 +2,7 @@ mod compare;
 mod geo;
 mod motis_batch;
 mod oracle;
+mod paired;
 mod reduce;
 mod stops_mode;
 mod stream;
@@ -243,6 +244,35 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Paired connector comparison (e.g. straight vs OSM access): identity and minutes.
+    ConnectorCompare {
+        #[arg(long)]
+        a: PathBuf,
+        #[arg(long)]
+        b: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Paired per-origin accessibility difference (B - A) between two reduce outputs.
+    SummaryDiff {
+        #[arg(long)]
+        a: PathBuf,
+        #[arg(long)]
+        b: PathBuf,
+        /// origin cells (weights for population-weighted totals)
+        #[arg(long)]
+        origins: PathBuf,
+        #[arg(long, default_value = "pop")]
+        weight_col: String,
+        #[arg(long, default_value = "fixed")]
+        semantics: String,
+        #[arg(long, value_delimiter = ',', default_value = "30,45,60,95")]
+        t: Vec<usize>,
+        #[arg(long, value_delimiter = ',', default_value = "1000,5000,10000,30000,50000")]
+        levels: Vec<f64>,
+        #[arg(long)]
+        out: PathBuf,
+    },
     /// Print a stream header and per-departure reachability counts.
     Inspect {
         #[arg(long)]
@@ -419,6 +449,12 @@ fn main() -> Result<()> {
         Cmd::FromMotisOneToAll { map, responses, stops, tag, n_origins, dep_start_unix_minutes, dep_count, dep_step, max_travel, out } => {
             let info = stops_mode::from_one_to_all(&map, &responses, &stops, &tag, n_origins, &departures(dep_start_unix_minutes, dep_count, dep_step), max_travel, &out)?;
             println!("{}", serde_json::to_string_pretty(&info)?);
+        }
+        Cmd::ConnectorCompare { a, b, out } => {
+            println!("{}", serde_json::to_string_pretty(&paired::connector_compare(&a, &b, &out)?)?);
+        }
+        Cmd::SummaryDiff { a, b, origins, weight_col, semantics, t, levels, out } => {
+            println!("{}", serde_json::to_string_pretty(&paired::summary_diff(&a, &b, &origins, &weight_col, &semantics, &t, &levels, &out)?)?);
         }
         Cmd::Dump { stream } => {
             let (h, recs) = stream::Reader::read_all(&stream)?;
