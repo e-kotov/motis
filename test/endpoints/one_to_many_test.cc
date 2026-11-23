@@ -8,6 +8,7 @@
 #include <future>
 #include <memory>
 #include <optional>
+#include <string>
 #include <vector>
 
 #include "utl/init_from.h"
@@ -983,12 +984,10 @@ TEST(one_to_many, street_routing) {
 TEST(one_to_many, street_car_prepared_matches) {
   auto [stock_data, fixture_config] =
       get_test_case<test_case::FFM_one_to_many_no_osr_footpath>();
+  auto const cache_config = config::read(
+      std::string{"limits:\n  onetomany_car_match_cache_max_bytes: 1048576\n"});
   auto enabled_config = fixture_config;
-  enabled_config.limits_ = config::read(R"(
-limits:
-  onetomany_car_match_cache_max_bytes: 1048576
-)")
-                               .limits_;
+  enabled_config.limits_ = cache_config.limits_;
   auto d = data{stock_data.path_, enabled_config};
   auto const stock = one_to_many_v1_get(stock_data);
   auto const candidate = one_to_many_v1_get(d);
