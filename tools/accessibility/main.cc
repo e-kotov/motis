@@ -747,6 +747,12 @@ int cmd_route(args const& a) {
             }
           }
         } else {
+          auto const& arrivals = state.one_to_all_arrivals_;
+          auto const base_offset = static_cast<std::int64_t>(
+              (std::chrono::time_point_cast<n::i32_minutes>(
+                   std::chrono::round<std::chrono::days>(start_time)) -
+               start_time)
+                  .count());
           // Egress exactly as stock transit_durations: rounds k >= 1 only,
           // arrival at the stop (vehicle arrival, no final transfer buffer)
           // plus the egress connector; transfers = k - 1.
@@ -754,17 +760,22 @@ int cmd_route(args const& a) {
             if (egress.begin_[s] == egress.begin_[s + 1U]) {
               continue;
             }
+            // Same values as nigiri::routing::for_each_one_to_all_round_time
+            // (rounds 0..max_transfers+1, duration = arrival on the day base
+            // round<days>(start) minus start), read directly to avoid a
+            // std::function call per stop and round.
             auto best = std::numeric_limits<std::int64_t>::max();
             auto best_k = std::uint8_t{0U};
-            n::routing::for_each_one_to_all_round_time(
-                tt, state, n::direction::kForward, n::location_idx_t{s},
-                start_time, max_transfers,
-                [&](std::uint8_t const k, n::duration_t const d) {
-                  if ((k != 0U || egress_round0) && d.count() < best) {
-                    best = d.count();
-                    best_k = k;
-                  }
-                });
+            for (auto k = egress_round0 ? 0U : 1U; k <= max_transfers + 1U; ++k) {
+              auto const v = arrivals[k][s];
+              if (v != n::kInvalidDelta<n::direction::kForward>) {
+                auto const d = base_offset + static_cast<std::int64_t>(v);
+                if (d < best) {
+                  best = d;
+                  best_k = static_cast<std::uint8_t>(k);
+                }
+              }
+            }
             if (best == std::numeric_limits<std::int64_t>::max()) {
               continue;
             }
