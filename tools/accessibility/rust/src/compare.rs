@@ -9,6 +9,9 @@ use std::path::Path;
 #[derive(Serialize, Default)]
 pub struct Report {
     pub origins_compared: u64,
+    pub duplicate_origins_in_a: Vec<u32>,
+    pub transfers_present_a: bool,
+    pub transfers_present_b: bool,
     pub origins_only_in_b: Vec<u32>,
     pub cells_compared: u64,
     pub equal: u64,
@@ -56,9 +59,15 @@ pub fn compare(a: &Path, b: &Path, max_report: usize, cap: Option<u16>) -> Resul
     let nd = ha.n_dests as usize;
     let mut rep = Report::default();
     let mut seen = std::collections::HashSet::new();
+    let mut seen_a = std::collections::HashSet::new();
+    rep.transfers_present_a = ha.has_transfers();
+    rep.transfers_present_b = hb.has_transfers();
     let mut rec = Record { origin: 0, tt: vec![], transfers: vec![], via: vec![] };
     let norm = |t: u16| if t != UNREACHABLE && t > cap { UNREACHABLE } else { t };
     while ra.next_into(&mut rec)? {
+        if !seen_a.insert(rec.origin) {
+            rep.duplicate_origins_in_a.push(rec.origin);
+        }
         let Some(rb) = by_origin.get(&rec.origin) else { continue };
         seen.insert(rec.origin);
         rep.origins_compared += 1;
@@ -120,6 +129,10 @@ pub fn compare(a: &Path, b: &Path, max_report: usize, cap: Option<u16>) -> Resul
 
 impl Report {
     pub fn tt_identical(&self) -> bool {
-        self.cells_compared > 0 && self.equal == self.cells_compared && self.origins_only_in_b.is_empty()
+        self.cells_compared > 0 && self.equal == self.cells_compared && self.origins_only_in_b.is_empty() && self.duplicate_origins_in_a.is_empty()
+    }
+    /// strict transfer agreement: both sides carry transfers and agree on every reachable cell
+    pub fn transfers_identical(&self) -> bool {
+        self.transfers_present_a && self.transfers_present_b && self.transfers_compared == self.reachable_equal && self.transfers_equal == self.transfers_compared
     }
 }

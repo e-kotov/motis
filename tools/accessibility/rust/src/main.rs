@@ -5,6 +5,7 @@ mod oracle;
 mod paired;
 mod reduce;
 mod stops_mode;
+mod validate;
 mod stream;
 
 use anyhow::{bail, Context, Result};
@@ -273,6 +274,29 @@ enum Cmd {
         #[arg(long)]
         out: PathBuf,
     },
+    /// Output gate: header/value invariants, origin coverage, transfer codes, canonical digest.
+    /// Exit 5 when invalid.
+    Validate {
+        #[arg(long)]
+        stream: PathBuf,
+        /// expected origin ids: comma list, or a CSV path with an `origin`/`stop`/`point` count
+        #[arg(long, value_delimiter = ',')]
+        expect_origins: Vec<u32>,
+        /// expect all origins 0..N
+        #[arg(long)]
+        expect_all_origins: Option<u32>,
+        #[arg(long, default_value_t = 14)]
+        max_transfers: u8,
+        #[arg(long)]
+        allow_walk_via_stop: bool,
+        #[arg(long)]
+        require_transfers: bool,
+        /// direct-walk connectors: every cell coded 254 must equal its direct connector
+        #[arg(long)]
+        direct: Option<PathBuf>,
+        #[arg(long)]
+        json: Option<PathBuf>,
+    },
     /// Print a stream header and per-departure reachability counts.
     Inspect {
         #[arg(long)]
@@ -419,7 +443,7 @@ fn main() -> Result<()> {
                 eprintln!("compare: travel times DIFFER");
                 std::process::exit(3);
             }
-            if strict_transfers && rep.transfers_equal != rep.transfers_compared {
+            if strict_transfers && !rep.transfers_identical() {
                 eprintln!("compare: transfer counts DIFFER");
                 std::process::exit(4);
             }
@@ -455,6 +479,27 @@ fn main() -> Result<()> {
         }
         Cmd::SummaryDiff { a, b, origins, weight_col, semantics, t, levels, out } => {
             println!("{}", serde_json::to_string_pretty(&paired::summary_diff(&a, &b, &origins, &weight_col, &semantics, &t, &levels, &out)?)?);
+        }
+        Cmd::Validate { stream, expect_origins, expect_all_origins, max_transfers, allow_walk_via_stop, require_transfers, direct, json } => {
+            if max_transfers > 14 {
+                bail!("--max-transfers must be in [0, 14]");
+            }
+            let origins = match expect_all_origins {
+                Some(n) => Some((0..n).collect()),
+                None if !expect_origins.is_empty() => Some(expect_origins),
+                None => None,
+            };
+            let ex = validate::Expect { origins, max_transfers, allow_walk_via_stop, require_transfers, direct: direct.as_ref().map(|p| validate::read_direct(p)).transpose()? };
+            let rep = validate::validate(&stream, &ex)?;
+            let txt = serde_json::to_string_pretty(&rep)?;
+            println!("{}", txt);
+            if let Some(j) = json {
+                std::fs::write(j, &txt)?;
+            }
+            if !rep["valid"].as_bool().unwrap_or(false) {
+                eprintln!("validate: INVALID");
+                std::process::exit(5);
+            }
         }
         Cmd::Dump { stream } => {
             let (h, recs) = stream::Reader::read_all(&stream)?;
