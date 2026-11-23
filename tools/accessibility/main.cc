@@ -527,7 +527,8 @@ int cmd_route(args const& a) {
   // Optional explicit origin subset (comma-separated indices), else the range.
   auto origin_list = std::vector<std::uint32_t>{};
   if (a.has("origin-list")) {
-    for (auto const x : split(a.str("origin-list"), ',')) {
+    auto const list = a.str("origin-list");  // keep alive: split returns views
+    for (auto const x : split(list, ',')) {
       auto const v = parse_num<std::uint32_t>(x);
       if (v >= n_origins) {
         throw std::runtime_error("origin-list entry out of range");
