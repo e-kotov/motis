@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reference reader for `motis-accessibility export-tt --format bin` (timetable.vrtt).
 
-    vrtt.py check FILE            verify magic, version, directory (each required section\n                                  exactly once), layout, checksum, interval order and the\n                                  consistency of every array (lengths, CSR indexes, bounds);\n                                  exit 2 if invalid
+    vrtt.py check FILE            verify magic, version, directory (each required section\n                                  exactly once), layout, checksum, interval order and the\n                                  consistency of arrays, UTF-8 IDs and trip window overlap;\n                                  exit 2 if invalid
     vrtt.py to-csv FILE OUT_DIR   regenerate the CSV export's five tables byte for byte
 
 Standard library only. The layout is described in tools/accessibility/README.md.
@@ -50,12 +50,19 @@ def check_csr(begin, n_rows, payload_len, name):
 
 def validate(meta, s):
     """Structural checks of a loaded export (raises Invalid)."""
-    require(meta["from_unix_minutes"] <= meta["to_unix_minutes"], "export interval: from > to")
+    start, end = meta["from_unix_minutes"], meta["to_unix_minutes"]
+    require(start <= end, "export interval: from > to")
     require(meta["days_from"] <= meta["days_to"], "internal interval: days_from > days_to")
     n = len(s["loc_parent"])
     for k in ("loc_type", "loc_transfer", "loc_base", "loc_traffic", "loc_src", "loc_lat", "loc_lon"):
         require(len(s[k]) == n, f"{k}: {len(s[k])} entries, expected {n}")
-    check_csr(s["loc_id_offsets"], n, len(s["loc_id_bytes"]), "loc_id_offsets")
+    ids, offsets = bytes(s["loc_id_bytes"]), s["loc_id_offsets"]
+    check_csr(offsets, n, len(ids), "loc_id_offsets")
+    for i in range(n):
+        try:
+            ids[offsets[i]:offsets[i + 1]].decode("utf-8")
+        except UnicodeDecodeError as e:
+            raise Invalid(f"location {i}: invalid UTF-8 ID") from e
     require(all(-1 <= x < n for x in s["loc_parent"]), "loc_parent out of range")
     require(all(x < n for x in s["loc_base"]), "loc_base out of range")
     require(all(x <= 3 for x in s["loc_type"]), "loc_type out of range")
@@ -81,7 +88,9 @@ def validate(meta, s):
         require(eb[t + 1] - eb[t] == rb[r + 1] - rb[r], f"trip {t}: event count differs from its route length")
         require(eb[t + 1] > eb[t], f"trip {t}: no events")
         require(s["ev_arr"][eb[t]] == -1 and s["ev_dep"][eb[t + 1] - 1] == -1, f"trip {t}: missing -1 end markers")
-        require(s["trip_first_dep"][t] <= s["trip_last_arr"][t], f"trip {t}: first departure after last arrival")
+        first, last = s["trip_first_dep"][t], s["trip_last_arr"][t]
+        require(first <= last, f"trip {t}: first departure after last arrival")
+        require(last >= start and first <= end, f"trip {t}: outside export interval")
 
 
 def load(path, verify_checksum=True):
@@ -162,7 +171,7 @@ def to_csv(s, out):
         f.write("loc,id,src,lat,lon,parent,type,transfer_time,base,traffic\n")
         for i in range(n_loc):
             f.write("%d,%s,%d,%.7f,%.7f,%d,%d,%d,%d,%d\n" % (
-                i, ids[off[i]:off[i + 1]].decode(), s["loc_src"][i], s["loc_lat"][i], s["loc_lon"][i],
+                i, ids[off[i]:off[i + 1]].decode("utf-8"), s["loc_src"][i], s["loc_lat"][i], s["loc_lon"][i],
                 s["loc_parent"][i], s["loc_type"][i], s["loc_transfer"][i], s["loc_base"][i],
                 s["loc_traffic"][i]))
     with open(os.path.join(out, "footpaths.csv"), "w", newline="\n") as f:

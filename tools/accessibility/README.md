@@ -206,4 +206,3 @@ The payload is arrival times only. **No journeys are reconstructed.**
 | `oracle` | Independent GTFS connection scan; it shares only the stop index, transfer times and footpaths with Nigiri. It honours `transfer_type=3` trip-to-trip rules. Semantics: `stock`, `strict`, `walkstop`. Has `--explain` witnesses and `--active-stops-out`. The full rule list is in `src/oracle.rs`. |
 | `connector-compare`, `summary-diff` | Paired comparison, e.g. straight-line vs OSM arm. |
 | `inspect`, `dump` | Stream header and counts; CSV dump. |
-

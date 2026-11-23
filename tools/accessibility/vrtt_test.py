@@ -8,8 +8,8 @@ The valid file must pass. Each corrupted copy must be rejected (exit 2) with
 its own expected reason, each corruption isolated so that no earlier check
 fires: duplicate section (replacing a required one), unknown section, missing
 section (file re-laid out without it), reversed export interval, mismatched CSR
-index array, non-monotone index array (final entry intact) and a flipped payload
-byte. Except for the last case the checksum is recomputed (or the file rewritten)
+index array, non-monotone index array (final entry intact), trips outside the
+export window, invalid UTF-8 in a location ID and a flipped payload byte. Except for the last case the checksum is recomputed (or the file rewritten)
 so only the structural checks can catch them. Exit 0 if all expectations hold.
 """
 import os
@@ -17,6 +17,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
@@ -73,6 +74,18 @@ def drop_section(src, dst, name):
     vrtt.write(dst, meta, s, order=[x for x in vrtt.ORDER if x != name])
 
 
+def move_window(buf):
+    _, _, offset, count = directory(buf)["trip_last_arr"]
+    start = max(last for (last,) in struct.iter_unpack("<q", buf[offset:offset + 8 * count])) + 20
+    end = max(start, struct.unpack_from("<q", buf, 24)[0])
+    struct.pack_into("<qq", buf, 16, start, end)
+
+
+def corrupt_location_id(buf):
+    _, _, offset, _ = directory(buf)["loc_id_bytes"]
+    buf[offset] = 0xff
+
+
 def flip_payload(buf):
     _, elem, offset, count = directory(buf)["ev_arr"]
     buf[offset + (count // 2) * elem] ^= 0x01
@@ -91,6 +104,8 @@ CASES = [
      "fp_begin: ends at"),
     ("non-monotone index array (ev_begin[1], final entry intact)", lambda b: unsort(b, "ev_begin"), True,
      "ev_begin: not monotone"),
+    ("outside-window", move_window, False, "trip 0: outside export interval"),
+    ("invalid-utf8-id", corrupt_location_id, True, "location 0: invalid UTF-8 ID"),
     ("flipped payload byte (ev_arr), checksum kept", flip_payload, False, "checksum mismatch"),
 ]
 
@@ -123,11 +138,13 @@ def synthetic(path):
 def main():
     if sys.argv[1] == "--synthetic":
         tmp = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="vrtt-test-")
-        src = os.path.join(tmp, "synthetic.vrtt")
-        synthetic(src)
     else:
         src = sys.argv[1]
         tmp = sys.argv[2] if len(sys.argv) > 2 else tempfile.mkdtemp(prefix="vrtt-test-")
+    Path(tmp).mkdir(parents=True, exist_ok=True)
+    if sys.argv[1] == "--synthetic":
+        src = os.path.join(tmp, "synthetic.vrtt")
+        synthetic(src)
     ok = True
     rc, err = check(src)
     print(f"valid {src}: rc={rc} {err}")
@@ -143,7 +160,8 @@ def main():
                 rechecksum(buf)
             open(path, "wb").write(buf)
         rc, err = check(path)
-        good = rc == 2 and reason in err
+        exact = label in ("outside-window", "invalid-utf8-id")
+        good = rc == 2 and (err == f"invalid: {reason}" if exact else reason in err)
         ok &= good
         print(f"{'REJECTED' if good else 'WRONG'} {label}: rc={rc} {err} (expected reason: {reason})")
         os.remove(path)
