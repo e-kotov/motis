@@ -27,9 +27,12 @@
 #include <thread>
 #include <vector>
 
+#include <pthread.h>
+#include <sched.h>
 #include <sys/resource.h>
 
 #include "fmt/core.h"
+#include "fmt/ranges.h"
 
 #include "utl/init_from.h"
 
@@ -76,6 +79,32 @@ using clock_t_ = std::chrono::steady_clock;
 double ms_since(clock_t_::time_point const t) {
   return std::chrono::duration<double, std::milli>(clock_t_::now() - t)
       .count();
+}
+
+// CPUs this process may run on (the job's cpuset), ascending.
+std::vector<int> allowed_cpus() {
+  auto set = cpu_set_t{};
+  CPU_ZERO(&set);
+  if (sched_getaffinity(0, sizeof(set), &set) != 0) {
+    throw std::runtime_error("sched_getaffinity failed");
+  }
+  auto cpus = std::vector<int>{};
+  for (auto c = 0; c != CPU_SETSIZE; ++c) {
+    if (CPU_ISSET(c, &set)) {
+      cpus.push_back(c);
+    }
+  }
+  return cpus;
+}
+
+// Pins the calling thread to one CPU (--pin-threads: worker i -> i-th allowed CPU).
+void pin_current_thread(int const cpu) {
+  auto set = cpu_set_t{};
+  CPU_ZERO(&set);
+  CPU_SET(cpu, &set);
+  if (pthread_setaffinity_np(pthread_self(), sizeof(set), &set) != 0) {
+    throw std::runtime_error(fmt::format("cannot pin thread to cpu {}", cpu));
+  }
 }
 
 long peak_rss_kb() {
@@ -839,6 +868,12 @@ int cmd_route(args const& a) {
   auto const egress_round0 = egress_rounds == "all";
   auto const with_via = a.has("with-egress-stop");
   auto const n_threads = static_cast<unsigned>(a.checked("threads", 1, 1, 4096));
+  auto const pin_threads = a.has("pin-threads");
+  auto const cpus = allowed_cpus();
+  if (pin_threads && cpus.size() < n_threads) {
+    throw std::runtime_error(fmt::format(
+        "--pin-threads: {} threads but only {} allowed cpus", n_threads, cpus.size()));
+  }
   auto const out_path = a.str("out");
   auto const timing_path = a.str("timing-json", "");
   auto const discard = a.has("discard");  // timing-only: compute, write no records
@@ -1075,7 +1110,12 @@ int cmd_route(args const& a) {
   };
   auto threads = std::vector<std::thread>{};
   for (auto i = 0U; i != std::max(1U, n_threads); ++i) {
-    threads.emplace_back(worker);
+    threads.emplace_back([&, i]() {
+      if (pin_threads) {
+        pin_current_thread(cpus[i]);
+      }
+      worker();
+    });
   }
   for (auto& th : threads) {
     th.join();
@@ -1092,13 +1132,14 @@ int cmd_route(args const& a) {
       "\"route_wall_ms\":{:.3f},\"kernel_thread_ms\":{:.3f},"
       "\"reduce_thread_ms\":{:.3f},\"write_thread_ms\":{:.3f},"
       "\"peak_rss_kb\":{},\"n_locations\":{},\"reuse_state\":{},\"nigiri_reusable_one_to_all\":{},"
+      "\"pin_threads\":{},\"allowed_cpus\":\"{}\","
       "\"reuse_init_thread_ms\":{:.3f},\"reuse_scan_thread_ms\":{:.3f},\"reuse_finish_thread_ms\":{:.3f}}}",
       kFormatVersion, target_stops ? "stops" : "dests", egress_rounds, origin_from, origin_to,
       n_dests, dep_count, n_threads, discard, max_travel,
       static_cast<int>(max_transfers), n_queries.load(), l.load_ms_, conn_ms,
       route_ms, kernel_ns.load() / 1e6, reduce_ns.load() / 1e6,
       write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations(), reuse_state,
-      kHasReusableOneToAll<n::timetable>,
+      kHasReusableOneToAll<n::timetable>, pin_threads, fmt::join(cpus, " "),
       reuse_init_ns.load() / 1e6, reuse_scan_ns.load() / 1e6, reuse_finish_ns.load() / 1e6);
   if (!timing_path.empty()) {
     auto tj = std::ofstream{timing_path};

@@ -24,7 +24,7 @@ motis-accessibility route      --data DIR --n-origins N [--n-dests M] --access A
                                --dep-start-unix-minutes T0 [--dep-count C] [--dep-step-minutes S] --max-travel-minutes CAP \
                                [--max-transfers 0..14] [--target dests|stops] [--egress-rounds transit|all] \
                                [--origin-from I --origin-to J | --origin-list I,J,..] [--with-transfers] [--with-egress-stop] \
-                               [--threads T] [--discard] --out stream.bin [--timing-json t.json]
+                               [--threads T] [--pin-threads] [--reuse-state] [--discard] --out stream.bin [--timing-json t.json]
 ```
 
 ### `stops`
@@ -80,6 +80,12 @@ Bounds and modes:
   the range are rejected before narrowing.
 - `--max-travel-minutes` must be in **[0, 1440]**.
 - `--discard` computes everything and writes no records. It is for timing only.
+- `--reuse-state` keeps one Nigiri `raptor_state` per worker thread instead of a
+  fresh one per query; every query still starts from a reset state, so outputs are
+  unchanged. With a Nigiri that provides `one_to_all(tt, rtt, q, raptor_state&)` the
+  stock function runs into the reused state; otherwise the tool runs its body.
+- `--pin-threads` pins worker *i* to the *i*-th CPU the process may use (its
+  cpuset). The timing JSON records the allowed CPUs.
 - The timing JSON records the effective `max_transfers`, `max_travel_minutes`,
   `egress_rounds`, `discard` and the stage times.
 
