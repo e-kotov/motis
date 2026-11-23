@@ -703,7 +703,8 @@ constexpr bool kHasReusableOneToAll =
       n::routing::one_to_all<n::direction::kForward>(tt, nullptr, q, s);
     };
 
-n::routing::raptor_state const& one_to_all_reuse(n::timetable const& tt,
+template <typename TT>  // a template so that the branch for the other Nigiri is discarded
+n::routing::raptor_state const& one_to_all_reuse(TT const& tt,
                                                  n::routing::query const& q,
                                                  reuse_ctx& c) {
   namespace r = n::routing;
@@ -713,7 +714,7 @@ n::routing::raptor_state const& one_to_all_reuse(n::timetable const& tt,
         std::chrono::duration_cast<std::chrono::nanoseconds>(b - a).count());
   };
   auto const t0 = clock_t_::now();
-  if constexpr (kHasReusableOneToAll<n::timetable>) {
+  if constexpr (kHasReusableOneToAll<TT>) {
     r::one_to_all<n::direction::kForward>(tt, nullptr, q, c.state_);
     c.scan_ns_ += ns(t0, clock_t_::now());
     return c.state_;
