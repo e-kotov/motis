@@ -29,6 +29,8 @@ def read_stream(path):
         if magic != b"VRTTMATX":
             raise ValueError("not a route stream")
         (version, n_total, n_dests, n_dep, o_from, o_to, cap, flags, target) = struct.unpack_from("<IIIIIIHBB", hdr, 8)
+        if version != 1:
+            raise ValueError(f"unsupported stream version {version}")
         f.read(8 * n_dep)
         u16 = bool(flags & 4)
         size = 2 if u16 else 1
@@ -41,15 +43,31 @@ def read_stream(path):
             if not b:
                 break
             (o,) = struct.unpack("<I", b)
+            if o in out:
+                raise ValueError(f"duplicate stream record for origin {o}")
             raw = f.read(block * size)
+            if len(raw) != block * size:
+                raise ValueError("truncated stream record")
             vals = struct.unpack(f"<{block}{'H' if u16 else 'B'}", raw)
             f.read(extra)
             out[o] = vals
     return n_dests, n_dep, unreach, out
 
 
-def percentile_index(n, p):  # TravelTimeReducer.findPercentileIndex
-    return int(math.ceil(p / 100 * n) - 1)
+def percentile_index(n, p):
+    """TravelTimeReducer.findPercentileIndex, ceil(p / 100 * n) - 1, for integer
+    p in 1..100, in exact integer arithmetic (no float drift on boundaries)."""
+    if not (isinstance(p, int) and 1 <= p <= 100):
+        raise ValueError(f"percentile {p!r} is not an integer in 1..100")
+    return -(-p * n // 100) - 1
+
+
+def safe_exp(x):
+    """math.exp, but +inf on overflow (as IEEE / C++ std::exp)."""
+    try:
+        return math.exp(x)
+    except OverflowError:
+        return math.inf
 
 
 class Decay:
@@ -79,8 +97,8 @@ class Decay:
                 return 1
             if t >= TWO_HOURS:
                 return 0
-            return math.exp(math.log(0.5) / c * t) if n == "exponential" else math.exp(-self.k * t)
-        g = lambda m, tt: 1 + math.exp(((tt - m) * math.pi) / (self.sd * math.sqrt(3)))
+            return safe_exp(math.log(0.5) / c * t) if n == "exponential" else safe_exp(-self.k * t)
+        g = lambda m, tt: 1 + safe_exp(((tt - m) * math.pi) / (self.sd * math.sqrt(3)))
         return g(c, 0) / g(c, t)
 
     def zero(self, c):  # DecayFunction.reachesZeroAt
@@ -98,17 +116,48 @@ class Decay:
         return lo
 
 
+def selftest():
+    """Hand-ranked boundaries: with times 1..N, percentile p is the value at
+    rank k = the smallest k with 100 * k >= p * N (counted by a loop here)."""
+    bad = 0
+    for n in (1, 2, 3, 7, 30, 99, 100, 101, 120, 150, 151, 1440):
+        for p in range(1, 101):
+            k = 1
+            while 100 * k < p * n:
+                k += 1
+            if percentile_index(n, p) + 1 != k:
+                bad += 1
+                print(f"N={n} p={p}: index {percentile_index(n, p)} rank {k}")
+    # the float formula this replaces drifts, e.g. N=100, p=7 -> rank 8
+    drift = [p for p in range(1, 101) if int(math.ceil(p / 100 * 100) - 1) + 1 != p]
+    print(f"selftest: failures={bad}; float formula would misrank N=100 at p={drift}")
+    for spec in ("logistic:0.1", "logistic:10", "exponential", "fixed-exponential:0.001", "linear:10", "step"):
+        d = Decay(spec)
+        for c in (60, 1800, 3600):
+            for t in (0, 1, 59, 60, 61, 1800, 7199, 7200, 14400, 86400):
+                w = d.weight(c, t)
+                if not (0 <= w <= 1):
+                    bad += 1
+                    print(f"{spec} weight({c}, {t}) = {w}")
+            d.zero(c)
+    print(f"selftest: {'OK' if bad == 0 else 'FAILED'}")
+    return 0 if bad == 0 else 1
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--stream", required=True)
-    ap.add_argument("--r5r-dir", required=True)
+    ap.add_argument("--stream")
+    ap.add_argument("--r5r-dir")
+    ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--percentiles", default="50")
     ap.add_argument("--opportunities")
     ap.add_argument("--opportunity-columns", default="")
     ap.add_argument("--cutoffs", default="")
     ap.add_argument("--decay", default="step")
     a = ap.parse_args()
-    pcts = [float(x) for x in a.percentiles.split(",")]
+    if a.selftest:
+        sys.exit(selftest())
+    pcts = [int(x) for x in a.percentiles.split(",")]
     n_dests, n_dep, unreach, stream = read_stream(a.stream)
     idx = [percentile_index(n_dep, p) for p in pcts]
     opp = {}
@@ -152,15 +201,20 @@ def main():
         magic = f.read(8)
         version, nd, npct, ndep = struct.unpack("<IIII", f.read(16))
         got_p = struct.unpack(f"<{npct}d", f.read(8 * npct))
-        if magic != b"VRR5TTM1" or nd != n_dests or ndep != n_dep or list(got_p) != pcts:
-            print("ttm.bin header mismatch"); ok = False
+        if magic != b"VRR5TTM1" or version != 1 or nd != n_dests or ndep != n_dep or list(got_p) != [float(p) for p in pcts]:
+            print(f"ttm.bin header mismatch (magic {magic!r}, version {version})"); ok = False
         got = {}
         while True:
             b = f.read(4)
             if not b:
                 break
             (o,) = struct.unpack("<I", b)
-            got[o] = list(struct.unpack(f"<{nd * npct}H", f.read(2 * nd * npct)))
+            if o in got:
+                print(f"ttm.bin: duplicate record for origin {o}"); ok = False
+            rec = f.read(2 * nd * npct)
+            if len(rec) != 2 * nd * npct:
+                print("ttm.bin: truncated record"); ok = False; break
+            got[o] = list(struct.unpack(f"<{nd * npct}H", rec))
     if set(got) != set(expected_ttm):
         print("ttm.bin origin set differs"); ok = False
     diff = sum(1 for o in expected_ttm if got.get(o) != expected_ttm[o])
@@ -170,7 +224,10 @@ def main():
     ok &= diff == 0
     got_acc = {}
     for r in csv.DictReader(open(f"{a.r5r_dir}/accessibility.csv")):
-        got_acc[(int(r["origin"]), r["opportunity"], float(r["percentile"]), int(r["cutoff"]))] = float(r["accessibility"])
+        k = (int(r["origin"]), r["opportunity"], int(r["percentile"]), int(r["cutoff"]))
+        if k in got_acc:
+            print(f"accessibility.csv: duplicate row {k}"); ok = False
+        got_acc[k] = float(r["accessibility"])
     if set(got_acc) != set(expected_acc):
         print(f"accessibility keys differ: got {len(got_acc)} expected {len(expected_acc)}"); ok = False
     nd_acc = [k for k in expected_acc if got_acc.get(k) != expected_acc[k]]

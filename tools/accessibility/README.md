@@ -174,7 +174,11 @@ and `analyst/decay/*.java`, `conveyal/r5` dev `500ce263`), which `r5r` wraps.
 - **Travel-time percentiles** (like `r5r::travel_time_matrix()`). For each
   destination, its travel times over the departures are sorted, with unreached
   last. Percentile *p* is the element at index ⌈p/100 · n⌉ − 1: no interpolation, the
-  smallest value with no more than *p* % of the times below it. Unreached means
+  smallest value with no more than *p* % of the times below it.
+  - Percentiles are **integers 1–100**, as R5's `int[]`, and the rank is computed
+    exactly as (p·n + 99) / 100 in integer arithmetic.
+  - Floating-point evaluation drifts on exact boundaries: for n = 100 it misranks
+    p = 7, 14, 28, 55 and 56. Unreached means
   later than `--max-travel-minutes`, as r5r's `max_trip_duration`. Times are whole
   Nigiri minutes; R5 works in seconds and truncates to minutes, which gives the same
   values for whole minutes.
@@ -196,6 +200,11 @@ and `analyst/decay/*.java`, `conveyal/r5` dev `500ce263`), which `r5r` wraps.
     n_departures, `f64` percentiles[]. Then, per origin in completion order: `u32`
     origin and `u16` minutes [n_dests][n_percentiles], with 65535 for unreached.
   - `accessibility.csv`: `origin,opportunity,percentile,cutoff,accessibility`.
+- **`motis-accessibility r5r-reduce --stream S.bin --r5r-out DIR ...`** computes
+  the same two files from a raw `route --out` stream, with the same options. It is
+  the output-equivalent "raw stream + reducer" path.
+- **`motis-accessibility r5r-selftest --out DIR`** checks the percentile ranks
+  against hand-ranked boundaries: times 1..N, every p in 1..100, N from 1 to 1440.
 - **Reference check:** `r5r_reference.py --stream S.bin --r5r-dir DIR ...` recomputes
   both files from a raw `--out` stream of the same run, using only the standard library.
 
