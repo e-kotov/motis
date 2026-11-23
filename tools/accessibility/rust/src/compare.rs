@@ -24,6 +24,8 @@ pub struct Report {
     pub transfers_mode_mismatch: u64,
     pub first_mismatches: Vec<Mismatch>,
     pub first_transfer_mismatches: Vec<Mismatch>,
+    /// travel-time mismatches per "origin:departure_index"
+    pub mismatch_groups: BTreeMap<String, u64>,
 }
 
 #[derive(Serialize, Clone)]
@@ -105,6 +107,7 @@ pub fn compare(a: &Path, b: &Path, max_report: usize, cap: Option<u16>) -> Resul
                     *rep.diff_histogram.entry(d).or_default() += 1;
                     rep.max_abs_diff = rep.max_abs_diff.max(d.unsigned_abs());
                 }
+                *rep.mismatch_groups.entry(format!("{}:{}", rec.origin, i / nd)).or_default() += 1;
                 if rep.first_mismatches.len() < max_report {
                     rep.first_mismatches.push(mk());
                 }
