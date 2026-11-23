@@ -5,9 +5,13 @@
 
 Always (r5r_reference.py): the valid stream parses; a stream with its final
 byte (in the transfers block) removed, and one with a trailing partial origin
-id, are rejected (exit 2); --percentiles 100,7 and 7,7 are rejected (exit 2).
+id, are rejected (exit 2); --percentiles 100,7 and 7,7 are rejected (exit 2);
+--opportunities with --cutoffs omitted or empty ("") is rejected (exit 2), checked
+against a hand-written travel-time-only output (p50) that the reference without
+--opportunities reports IDENTICAL, so a false IDENTICAL cannot pass.
 With the binary also `r5r-reduce`: on the valid stream its outputs equal the
-reference (IDENTICAL), and it rejects the same four inputs (exit 2).
+reference (IDENTICAL), it rejects the same six inputs (exit 2), and the same
+cutoff cases are rejected against its own travel-time-only output.
 Exit 0 if every expectation holds. Standard library only.
 """
 import os
@@ -30,6 +34,8 @@ RECORDS = {
         [[255, 0, 1], [255, 0, 1], [2, 0, 1], [255, 0, 1]]),
 }
 OPTS = ["--percentiles", "5,50,100", "--cutoffs", "15,30,45", "--decay", "step"]
+# p50 over the 4 departures (rank ceil(0.5 * 4) = 2nd smallest, unreached last), by hand
+TTM_P50 = {0: [10, 40, 0xFFFF], 1: [0xFFFF, 21, 30]}
 
 
 def write_stream(path):
@@ -39,6 +45,16 @@ def write_stream(path):
     for o, (tt, tr) in RECORDS.items():
         body += struct.pack("<I", o) + bytes(x for row in tt for x in row) + bytes(x for row in tr for x in row)
     open(path, "wb").write(hdr + body)
+
+
+def write_ttm_only(out_dir):
+    """Travel-time-only r5r output (--percentiles 50, no --opportunities)."""
+    os.makedirs(out_dir, exist_ok=True)
+    with open(os.path.join(out_dir, "ttm.bin"), "wb") as f:
+        f.write(b"VRR5TTM1" + struct.pack("<IIII", 1, N_DESTS, 1, N_DEP) + struct.pack("<d", 50.0))
+        for o, vals in TTM_P50.items():
+            f.write(struct.pack("<I", o) + struct.pack(f"<{N_DESTS}H", *vals))
+    open(os.path.join(out_dir, "accessibility.csv"), "w").write("origin,opportunity,percentile,cutoff,accessibility\n")
 
 
 def run(cmd):
@@ -84,6 +100,27 @@ def main():
         rc, out = run(base + args)
         expect(f"reference rejects {label}", rc == 2 and reason in out, f"(rc={rc}: {out[-160:]})")
 
+    # --opportunities needs a non-empty --cutoffs list, as in the C++ tool. Checked against an
+    # existing travel-time-only output, where an ignored accessibility part would read IDENTICAL.
+    def cutoff_cases(tt_dir, tool):
+        rc, out = run([sys.executable, REF, "--stream", valid, "--r5r-dir", tt_dir, "--percentiles", "50"])
+        expect(f"reference: {tool} travel-time-only output (no --opportunities) is IDENTICAL",
+               rc == 0 and "IDENTICAL" in out, f"(rc={rc}: {out[-200:]})")
+        for label, extra, reason in [("omitted", [], "missing --cutoffs"), ('""', ["--cutoffs", ""], "bad number ''")]:
+            rc, out = run([sys.executable, REF, "--stream", valid, "--r5r-dir", tt_dir, "--percentiles", "50",
+                           "--opportunities", opp, "--opportunity-columns", "pop"] + extra)
+            expect(f"reference rejects --opportunities with --cutoffs {label} ({tool} output)",
+                   rc == 2 and reason in out, f"(rc={rc}: {out[-160:]})")
+
+    tt_hand = os.path.join(tmp, "tt-hand")
+    write_ttm_only(tt_hand)
+    cutoff_cases(tt_hand, "hand-written")
+    negative += [
+        ("--opportunities with --cutoffs omitted", ["--stream", valid, "--percentiles", "50"], "missing --cutoffs"),
+        ('--opportunities with --cutoffs ""', ["--stream", valid, "--percentiles", "50", "--cutoffs", ""],
+         "bad number ''"),
+    ]
+
     if binary:
         out_dir = os.path.join(tmp, "r5r")
         rc, out = run([binary, "r5r-reduce", "--stream", valid, "--r5r-out", out_dir, "--opportunities", opp,
@@ -92,6 +129,10 @@ def main():
         rc, out = run([sys.executable, REF, "--stream", valid, "--r5r-dir", out_dir, "--opportunities", opp,
                        "--opportunity-columns", "pop"] + OPTS)
         expect("r5r-reduce outputs == reference", rc == 0 and "IDENTICAL" in out, f"(rc={rc}: {out[-200:]})")
+        tt_bin = os.path.join(tmp, "tt-bin")
+        rc, out = run([binary, "r5r-reduce", "--stream", valid, "--r5r-out", tt_bin, "--percentiles", "50"])
+        expect("r5r-reduce writes a travel-time-only output", rc == 0, f"(rc={rc}: {out[-160:]})")
+        cutoff_cases(tt_bin, "r5r-reduce")
         for label, args, reason in negative:
             stream = args[1]
             opts = args[2:] if len(args) > 2 else []

@@ -180,7 +180,8 @@ and `analyst/decay/*.java`, `conveyal/r5` dev `500ce263`), which `r5r` wraps.
   - `--percentiles` and `--cutoffs` (1–240 minutes) must be **strictly increasing
     and unique**. `route --r5r-out`, `r5r-reduce` and `r5r_reference.py` reject
     anything else, for example `100,7` or `7,7`. Each percentile is evaluated on
-    its own.
+    its own. With `--opportunities`, a non-empty `--cutoffs` list is required;
+    all three reject an omitted or empty (`""`) one (exit 2).
   - Floating-point evaluation drifts on exact boundaries: for n = 100 it misranks
     p = 7, 14, 28, 55 and 56. Unreached means
   later than `--max-travel-minutes`, as r5r's `max_trip_duration`. Times are whole
@@ -213,8 +214,9 @@ and `analyst/decay/*.java`, `conveyal/r5` dev `500ce263`), which `r5r` wraps.
   including the optional transfer and egress-stop blocks. They reject a truncated
   record or trailing bytes after the last record (exit 2).
 - **`r5r_test.py TMP [motis-accessibility]`** runs regression tests on a synthetic
-  stream: rejected percentile lists, a stream missing its final byte, and a stream
-  with a trailing byte, plus, with the binary, `r5r-reduce` against the reference.
+  stream: rejected percentile lists, an omitted or empty `--cutoffs` with
+  `--opportunities`, a stream missing its final byte, and a stream with a trailing
+  byte, plus, with the binary, `r5r-reduce` against the reference.
 - **Reference check:** `r5r_reference.py --stream S.bin --r5r-dir DIR ...` recomputes
   both files from a raw `--out` stream of the same run, using only the standard library.
 

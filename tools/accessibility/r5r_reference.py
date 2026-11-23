@@ -63,7 +63,12 @@ def read_stream(path):
 def strictly_increasing(spec, lo, hi, name):
     """--percentiles / --cutoffs, as the C++ tool: strictly increasing unique
     integers in [lo, hi]."""
-    v = [int(x) for x in spec.split(",")]
+    v = []
+    for x in spec.split(","):
+        try:
+            v.append(int(x))
+        except ValueError:
+            raise ValueError(f"--{name}: bad number {x!r}") from None
     for i, x in enumerate(v):
         if not lo <= x <= hi:
             raise ValueError(f"--{name}: {x} is not an integer in [{lo}, {hi}]")
@@ -170,12 +175,16 @@ def main():
     ap.add_argument("--percentiles", default="50")
     ap.add_argument("--opportunities")
     ap.add_argument("--opportunity-columns", default="")
-    ap.add_argument("--cutoffs", default="")
+    ap.add_argument("--cutoffs")
     ap.add_argument("--decay", default="step")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
     pcts = strictly_increasing(a.percentiles, 1, 100, "percentiles")
+    # as the C++ tool: --opportunities needs a non-empty --cutoffs list
+    if a.opportunities and a.cutoffs is None:
+        raise ValueError("missing --cutoffs (required with --opportunities)")
+    cutoffs = strictly_increasing(a.cutoffs, 1, 240, "cutoffs") if a.cutoffs is not None else []
     n_dests, n_dep, unreach, stream = read_stream(a.stream)
     idx = [percentile_index(n_dep, p) for p in pcts]
     opp = {}
@@ -183,7 +192,6 @@ def main():
         rows = list(csv.DictReader(open(a.opportunities)))
         for c in a.opportunity_columns.split(","):
             opp[c] = [float(r[c]) for r in rows]
-    cutoffs = strictly_increasing(a.cutoffs, 1, 240, "cutoffs") if a.cutoffs else []
     decay = Decay(a.decay)
     zeros = [decay.zero(c * 60) for c in cutoffs]
 
