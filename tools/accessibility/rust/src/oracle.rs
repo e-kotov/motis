@@ -167,9 +167,18 @@ pub fn run(a: OracleArgs) -> Result<()> {
         }
     }
     let fpt = Table::read(&a.footpaths)?;
+    // Nigiri-generated virtual locations (empty GTFS id) are internal: the oracle neither
+    // walks to/from them nor reports arrivals there (Nigiri tracks arrivals at the base).
+    let is_virtual: Vec<bool> = st.rows.iter().map(|r| r[cid].is_empty()).collect();
     let mut fps: Vec<Vec<(u32, i64)>> = vec![vec![]; n_loc];
+    let mut skipped_virtual_fp = 0u64;
     for r in &fpt.rows {
-        fps[r[0].parse::<usize>()?].push((r[1].parse()?, r[2].parse()?));
+        let (from, to): (usize, u32) = (r[0].parse()?, r[1].parse()?);
+        if is_virtual[from] || is_virtual[to as usize] {
+            skipped_virtual_fp += 1;
+            continue;
+        }
+        fps[from].push((to, r[2].parse()?));
     }
     // timezone
     let (ah, ar) = g.table("agency.txt")?.context("agency.txt")?;
@@ -634,6 +643,7 @@ pub fn run(a: OracleArgs) -> Result<()> {
             "forbidden_transfer_rules": forb.len(),
             "boardings_blocked_by_rules": forbidden_hits,
             "readiness_label_overflow": label_overflow,
+            "footpaths_skipped_virtual": skipped_virtual_fp,
         }))?
     );
     Ok(())
