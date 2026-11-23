@@ -1089,7 +1089,8 @@ TEST(one_to_many, offsets_cache_key_equality_and_hash_agree) {
   EXPECT_EQ(hash(p_pos), hash(p_neg));
 
   auto other_params = a;
-  other_params.osr_params_.hgv_trailer_ = !other_params.osr_params_.hgv_trailer_;
+  other_params.osr_params_.hgv_trailer_ =
+      !other_params.osr_params_.hgv_trailer_;
   auto other_max = a;
   other_max.max_ = std::chrono::seconds{901};
   auto other_level = a;
@@ -1098,9 +1099,18 @@ TEST(one_to_many, offsets_cache_key_equality_and_hash_agree) {
   EXPECT_FALSE(eq(a, other_max));
   EXPECT_FALSE(eq(a, other_level));
 
-  auto const keys = std::vector<cache::key>{
-      a, a_ulp, z_pos, z_neg, p_pos, p_neg, other_params, other_max, other_level,
-      make(std::nextafter(50.0, 49.0), 8.0), make(50.0, std::nextafter(8.0, 9.0))};
+  auto const keys =
+      std::vector<cache::key>{a,
+                              a_ulp,
+                              z_pos,
+                              z_neg,
+                              p_pos,
+                              p_neg,
+                              other_params,
+                              other_max,
+                              other_level,
+                              make(std::nextafter(50.0, 49.0), 8.0),
+                              make(50.0, std::nextafter(8.0, 9.0))};
   for (auto const& x : keys) {
     EXPECT_TRUE(eq(x, x));
     for (auto const& y : keys) {

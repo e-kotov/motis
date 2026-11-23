@@ -183,15 +183,13 @@ std::vector<api::ParetoSet> transit_durations(
   auto const& arrivals = state.one_to_all_arrivals_;
   auto const day_base =
       ep.tt_.internal_interval_days().from_ +
-      static_cast<int>(
-          std::chrono::duration_cast<date::days>(
-              std::chrono::round<date::days>(time) -
-              ep.tt_.internal_interval().from_)
-              .count()) *
+      static_cast<int>(std::chrono::duration_cast<date::days>(
+                           std::chrono::round<date::days>(time) -
+                           ep.tt_.internal_interval().from_)
+                           .count()) *
           date::days{1};
-  auto const last_k =
-      std::min(static_cast<std::size_t>(q.max_transfers_) + 1U,
-               static_cast<std::size_t>(arrivals.n_rows_) - 1U);
+  auto const last_k = std::min(static_cast<std::size_t>(q.max_transfers_) + 1U,
+                               static_cast<std::size_t>(arrivals.n_rows_) - 1U);
 
   // Offsets of the many places do not depend on this request's one place or
   // time: reuse them across requests where they depend on static data only.
@@ -199,10 +197,10 @@ std::vector<api::ParetoSet> transit_durations(
       arrive_by ? osr::direction::kForward : osr::direction::kBackward;
   auto const cache_max_entries =
       ep.config_.get_limits().onetomany_offsets_cache_max_entries_;
-  auto const use_cache =
-      ep.offsets_cache_ != nullptr && cache_max_entries != 0U &&
-      one_to_many_offsets_cache::is_cacheable(many_modes, pedestrian_profile,
-                                              osr_params);
+  auto const use_cache = ep.offsets_cache_ != nullptr &&
+                         cache_max_entries != 0U &&
+                         one_to_many_offsets_cache::is_cacheable(
+                             many_modes, pedestrian_profile, osr_params);
   auto const get_many_offsets = [&](place_t const& l) {
     auto const compute = [&]() {
       return r.get_offsets(nullptr, l, many_dir, many_modes, rental_options{},
