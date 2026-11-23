@@ -25,13 +25,16 @@ TWO_HOURS = 7200
 def read_stream(path):
     with open(path, "rb") as f:
         hdr = f.read(56)
+        if len(hdr) != 56:
+            raise ValueError("truncated stream: header")
         magic = hdr[:8]
         if magic != b"VRTTMATX":
             raise ValueError("not a route stream")
         (version, n_total, n_dests, n_dep, o_from, o_to, cap, flags, target) = struct.unpack_from("<IIIIIIHBB", hdr, 8)
         if version != 1:
             raise ValueError(f"unsupported stream version {version}")
-        f.read(8 * n_dep)
+        if len(f.read(8 * n_dep)) != 8 * n_dep:
+            raise ValueError("truncated stream: departures")
         u16 = bool(flags & 4)
         size = 2 if u16 else 1
         unreach = 0xFFFF if u16 else 0xFF
@@ -41,17 +44,32 @@ def read_stream(path):
         while True:
             b = f.read(4)
             if not b:
-                break
+                break  # clean end: no bytes after the last complete record
+            if len(b) != 4:
+                raise ValueError(f"truncated stream: {len(b)} trailing byte(s), not a complete origin id")
             (o,) = struct.unpack("<I", b)
             if o in out:
                 raise ValueError(f"duplicate stream record for origin {o}")
             raw = f.read(block * size)
             if len(raw) != block * size:
-                raise ValueError("truncated stream record")
+                raise ValueError("truncated stream: travel-time block")
             vals = struct.unpack(f"<{block}{'H' if u16 else 'B'}", raw)
-            f.read(extra)
+            if len(f.read(extra)) != extra:  # transfers (u8) and egress-stop (u32) blocks
+                raise ValueError("truncated stream: transfer / egress-stop block")
             out[o] = vals
     return n_dests, n_dep, unreach, out
+
+
+def strictly_increasing(spec, lo, hi, name):
+    """--percentiles / --cutoffs, as the C++ tool: strictly increasing unique
+    integers in [lo, hi]."""
+    v = [int(x) for x in spec.split(",")]
+    for i, x in enumerate(v):
+        if not lo <= x <= hi:
+            raise ValueError(f"--{name}: {x} is not an integer in [{lo}, {hi}]")
+        if i and x <= v[i - 1]:
+            raise ValueError(f"--{name} must be strictly increasing and unique, got {x} after {v[i - 1]}")
+    return v
 
 
 def percentile_index(n, p):
@@ -157,7 +175,7 @@ def main():
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
-    pcts = [int(x) for x in a.percentiles.split(",")]
+    pcts = strictly_increasing(a.percentiles, 1, 100, "percentiles")
     n_dests, n_dep, unreach, stream = read_stream(a.stream)
     idx = [percentile_index(n_dep, p) for p in pcts]
     opp = {}
@@ -165,7 +183,7 @@ def main():
         rows = list(csv.DictReader(open(a.opportunities)))
         for c in a.opportunity_columns.split(","):
             opp[c] = [float(r[c]) for r in rows]
-    cutoffs = [int(x) for x in a.cutoffs.split(",")] if a.cutoffs else []
+    cutoffs = strictly_increasing(a.cutoffs, 1, 240, "cutoffs") if a.cutoffs else []
     decay = Decay(a.decay)
     zeros = [decay.zero(c * 60) for c in cutoffs]
 
@@ -184,7 +202,7 @@ def main():
                     continue
                 for pi, t in enumerate(pt_all[d]):
                     if t == UNREACHED:
-                        break
+                        continue  # this percentile only; the others are independent
                     for ci in range(len(cutoffs) - 1, -1, -1):
                         if t >= zeros[ci]:
                             break
@@ -208,6 +226,8 @@ def main():
             b = f.read(4)
             if not b:
                 break
+            if len(b) != 4:
+                print(f"ttm.bin: {len(b)} trailing byte(s)"); ok = False; break
             (o,) = struct.unpack("<I", b)
             if o in got:
                 print(f"ttm.bin: duplicate record for origin {o}"); ok = False
@@ -241,4 +261,8 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except ValueError as e:  # invalid options or input files
+        print(f"invalid: {e}", file=sys.stderr)
+        sys.exit(2)

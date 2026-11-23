@@ -1251,6 +1251,31 @@ struct decay {
 
 }  // namespace r5
 
+// --percentiles / --cutoffs of `route --r5r-out` and `r5r-reduce` (and
+// r5r_reference.py): strictly increasing, unique integers in [lo, hi]. Each
+// percentile and cutoff is evaluated on its own; the order only fixes the
+// output order (and R5's early exit over sorted cutoffs).
+std::vector<int> parse_strictly_increasing(std::string const& spec,
+                                           int const lo,
+                                           int const hi,
+                                           std::string_view const name) {
+  auto v = std::vector<int>{};
+  for (auto const x : split(spec, ',')) {
+    auto const i = parse_num<int>(x);
+    if (i < lo || i > hi) {
+      throw std::runtime_error(fmt::format(
+          "--{}: {} is not an integer in [{}, {}]", name, i, lo, hi));
+    }
+    if (!v.empty() && i <= v.back()) {
+      throw std::runtime_error(fmt::format(
+          "--{} must be strictly increasing and unique, got {} after {}", name,
+          i, v.back()));
+    }
+    v.push_back(i);
+  }
+  return v;
+}
+
 // r5r-style outputs of one window, shared by `route --r5r-out` and
 // `r5r-reduce`. ttm.bin: magic "VRR5TTM1", u32 version 1, u32 n_dests, u32
 // n_percentiles, u32 n_departures, f64 percentiles[n_percentiles] (integers),
@@ -1329,7 +1354,7 @@ struct r5r_output {
         for (auto pi = 0U; pi != n_p; ++pi) {
           auto const t = pt[pi];
           if (t == r5::kUnreached) {
-            break;
+            continue;  // this percentile only; the others are independent
           }
           for (auto ci = static_cast<int>(cutoffs_min_.size()) - 1; ci >= 0;
                --ci) {
@@ -1443,48 +1468,48 @@ int cmd_r5r_reduce(args const& a) {
   if (!in) {
     throw std::runtime_error(fmt::format("cannot open {}", stream.string()));
   }
+  // every read must deliver exactly the bytes the format requires
+  auto const read_exact = [&](void* dst, std::size_t const n,
+                              std::string_view const what) {
+    in.read(static_cast<char*>(dst), static_cast<std::streamsize>(n));
+    if (static_cast<std::size_t>(in.gcount()) != n) {
+      throw std::runtime_error(fmt::format(
+          "truncated stream: {} ({} of {} bytes)", what, in.gcount(), n));
+    }
+  };
   char magic[8];
-  in.read(magic, 8);
+  read_exact(magic, 8, "magic");
   if (std::string_view{magic, 8} != "VRTTMATX") {
     throw std::runtime_error("not a route stream");
   }
   auto hdr = std::array<std::uint32_t,
                         6>{};  // version, n_total, n_dests, n_dep, from, to
-  in.read(reinterpret_cast<char*>(hdr.data()), sizeof(hdr));
+  read_exact(hdr.data(), sizeof(hdr), "header");
   auto cap = std::uint16_t{};
   auto flags = std::uint8_t{};
   auto target = std::uint8_t{};
-  in.read(reinterpret_cast<char*>(&cap), 2);
-  in.read(reinterpret_cast<char*>(&flags), 1);
-  in.read(reinterpret_cast<char*>(&target), 1);
-  in.ignore(20);
+  read_exact(&cap, 2, "header");
+  read_exact(&flags, 1, "header");
+  read_exact(&target, 1, "header");
+  auto reserved = std::array<char, 20>{};
+  read_exact(reserved.data(), reserved.size(), "header");
   if (hdr[0] != 1U) {
     throw std::runtime_error(
         fmt::format("unsupported stream version {}", hdr[0]));
   }
   auto const n_dests = hdr[2];
   auto const n_deps = hdr[3];
-  in.ignore(static_cast<std::streamsize>(8U * n_deps));
-  auto percentiles = std::vector<int>{};
-  {
-    auto const ps = a.str("percentiles", "50");
-    for (auto const x : split(ps, ',')) {
-      auto const v = parse_num<int>(x);
-      if (v < 1 || v > 100) {
-        throw std::runtime_error("--percentiles must be integers in [1, 100]");
-      }
-      percentiles.push_back(v);
-    }
-  }
+  auto departures = std::vector<std::int64_t>(n_deps);
+  read_exact(departures.data(), 8U * n_deps, "departures");
+  auto const percentiles = parse_strictly_increasing(a.str("percentiles", "50"),
+                                                     1, 100, "percentiles");
   auto cutoffs_min = std::vector<int>{};
   auto opportunities = std::vector<std::vector<double>>{};
   auto names = std::vector<std::string>{};
   auto decay_spec = std::string{"step"};
   if (a.has("opportunities")) {
-    auto const cs = a.str("cutoffs");
-    for (auto const x : split(cs, ',')) {
-      cutoffs_min.push_back(parse_num<int>(x));
-    }
+    cutoffs_min =
+        parse_strictly_increasing(a.str("cutoffs"), 1, 240, "cutoffs");
     decay_spec = a.str("decay", "step");
     auto const table = read_csv(a.str("opportunities"));
     auto const cols = a.str("opportunity-columns");
@@ -1506,19 +1531,26 @@ int cmd_r5r_reduce(args const& a) {
   auto out = r5r_output{dir,         n_dests,    n_deps,        percentiles,
                         cutoffs_min, decay_spec, opportunities, names};
   auto const block = static_cast<std::size_t>(n_deps) * n_dests;
-  auto const extra = static_cast<std::streamsize>(
-      ((flags & 1U) ? block : 0U) + ((flags & 2U) ? 4U * block : 0U));
+  // optional transfers (u8) and egress-stop (u32) blocks, read and discarded
+  auto const extra =
+      ((flags & 1U) ? block : 0U) + ((flags & 2U) ? 4U * block : 0U);
+  auto tail = std::vector<char>(extra);
   auto const read_origins = [&](auto const type_tag) {
     using T = std::decay_t<decltype(type_tag)>;
     auto buf = std::vector<T>(block);
-    auto o = std::uint32_t{};
-    while (in.read(reinterpret_cast<char*>(&o), sizeof(o))) {
-      in.read(reinterpret_cast<char*>(buf.data()),
-              static_cast<std::streamsize>(block * sizeof(T)));
-      in.ignore(extra);
-      if (!in) {
-        throw std::runtime_error("truncated stream record");
+    while (true) {
+      auto o = std::uint32_t{};
+      in.read(reinterpret_cast<char*>(&o), sizeof(o));
+      if (in.gcount() == 0 && in.eof()) {
+        break;  // clean end: no bytes after the last complete record
       }
+      if (in.gcount() != sizeof(o)) {
+        throw std::runtime_error(fmt::format(
+            "truncated stream: {} trailing byte(s), not a complete origin id",
+            in.gcount()));
+      }
+      read_exact(buf.data(), block * sizeof(T), "travel-time block");
+      read_exact(tail.data(), extra, "transfer / egress-stop block");
       out.origin(o, buf.data(), std::numeric_limits<T>::max());
     }
   };
@@ -1766,29 +1798,11 @@ int cmd_route(args const& a) {
   auto opportunity_names = std::vector<std::string>{};
   auto decay_spec = std::string{"step"};
   if (emit_r5r) {
-    auto const ps = a.str("percentiles", "50");
-    for (auto const x : split(ps, ',')) {
-      auto const v = parse_num<int>(x);  // integers only, as R5
-      if (v < 1 || v > 100) {
-        throw std::runtime_error("--percentiles must be integers in [1, 100]");
-      }
-      percentiles.push_back(v);
-    }
-    if (!std::is_sorted(begin(percentiles), end(percentiles))) {
-      throw std::runtime_error("--percentiles must be ascending");
-    }
+    percentiles = parse_strictly_increasing(a.str("percentiles", "50"), 1, 100,
+                                            "percentiles");
     if (a.has("opportunities")) {
-      auto const cs = a.str("cutoffs");
-      for (auto const x : split(cs, ',')) {
-        auto const v = parse_num<int>(x);
-        if (v < 1 || v > 240) {
-          throw std::runtime_error("--cutoffs must be in [1, 240] minutes");
-        }
-        cutoffs_min.push_back(v);
-      }
-      if (!std::is_sorted(begin(cutoffs_min), end(cutoffs_min))) {
-        throw std::runtime_error("--cutoffs must be ascending");
-      }
+      cutoffs_min =
+          parse_strictly_increasing(a.str("cutoffs"), 1, 240, "cutoffs");
       decay_spec = a.str("decay", "step");
       auto const table = read_csv(a.str("opportunities"));
       auto const cols = a.str("opportunity-columns");
