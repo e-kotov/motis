@@ -567,8 +567,16 @@ int cmd_route(args const& a) {
   }
   auto const max_travel = static_cast<std::uint16_t>(max_travel_arg);
   auto const tt16 = max_travel > 253U;  // lossless u16 records above the u8 code range
-  auto const max_transfers =
-      static_cast<std::uint8_t>(a.integer("max-transfers", n::routing::kMaxTransfers));
+  // Validate before narrowing: Nigiri allocates kMaxTransfers + 2 rounds and the
+  // one_to_all result readers iterate up to the supplied value + 1.
+  auto const max_transfers_arg =
+      a.integer("max-transfers", static_cast<std::int64_t>(n::routing::kMaxTransfers));
+  if (max_transfers_arg < 0 ||
+      max_transfers_arg > static_cast<std::int64_t>(n::routing::kMaxTransfers)) {
+    throw std::runtime_error(fmt::format("--max-transfers must be in [0, {}], got {}",
+                                         n::routing::kMaxTransfers, max_transfers_arg));
+  }
+  auto const max_transfers = static_cast<std::uint8_t>(max_transfers_arg);
   auto const with_transfers = a.has("with-transfers");
   // transit (default, = stock one-to-many): egress only from rounds k >= 1.
   // all: also from round 0, i.e. walk origin->stop->destination without a vehicle.
@@ -808,12 +816,13 @@ int cmd_route(args const& a) {
   auto const json = fmt::format(
       "{{\"tool\":\"motis-accessibility\",\"format_version\":{},"
       "\"target\":\"{}\",\"egress_rounds\":\"{}\",\"origins\":[{},{}],\"n_dests\":{},\"n_departures\":{},"
-      "\"threads\":{},\"discard\":{},\"max_travel_minutes\":{},\"queries\":{},\"load_ms\":{:.3f},\"connectors_ms\":{:.3f},"
+      "\"threads\":{},\"discard\":{},\"max_travel_minutes\":{},\"max_transfers\":{},\"queries\":{},\"load_ms\":{:.3f},\"connectors_ms\":{:.3f},"
       "\"route_wall_ms\":{:.3f},\"kernel_thread_ms\":{:.3f},"
       "\"reduce_thread_ms\":{:.3f},\"write_thread_ms\":{:.3f},"
       "\"peak_rss_kb\":{},\"n_locations\":{}}}",
       kFormatVersion, target_stops ? "stops" : "dests", egress_rounds, origin_from, origin_to,
-      n_dests, dep_count, n_threads, discard, max_travel, n_queries.load(), l.load_ms_, conn_ms,
+      n_dests, dep_count, n_threads, discard, max_travel,
+      static_cast<int>(max_transfers), n_queries.load(), l.load_ms_, conn_ms,
       route_ms, kernel_ns.load() / 1e6, reduce_ns.load() / 1e6,
       write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations());
   if (!timing_path.empty()) {
