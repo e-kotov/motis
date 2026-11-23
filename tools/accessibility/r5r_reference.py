@@ -15,6 +15,7 @@ Standard library only.
 import argparse
 import csv
 import math
+import re
 import struct
 import sys
 
@@ -33,6 +34,8 @@ def read_stream(path):
         (version, n_total, n_dests, n_dep, o_from, o_to, cap, flags, target) = struct.unpack_from("<IIIIIIHBB", hdr, 8)
         if version != 1:
             raise ValueError(f"unsupported stream version {version}")
+        if n_dep == 0:
+            raise ValueError("stream n_departures must be at least 1")
         if len(f.read(8 * n_dep)) != 8 * n_dep:
             raise ValueError("truncated stream: departures")
         u16 = bool(flags & 4)
@@ -65,6 +68,8 @@ def strictly_increasing(spec, lo, hi, name):
     integers in [lo, hi]."""
     v = []
     for x in spec.split(","):
+        if re.fullmatch(r"\A-?[0-9]+\Z", x) is None:
+            raise ValueError(f"bad number {x!r}")
         try:
             v.append(int(x))
         except ValueError:
@@ -174,17 +179,23 @@ def main():
     ap.add_argument("--selftest", action="store_true")
     ap.add_argument("--percentiles", default="50")
     ap.add_argument("--opportunities")
-    ap.add_argument("--opportunity-columns", default="")
+    ap.add_argument("--opportunity-columns")
     ap.add_argument("--cutoffs")
     ap.add_argument("--decay", default="step")
     a = ap.parse_args()
     if a.selftest:
         sys.exit(selftest())
     pcts = strictly_increasing(a.percentiles, 1, 100, "percentiles")
-    # as the C++ tool: --opportunities needs a non-empty --cutoffs list
-    if a.opportunities is not None and a.cutoffs is None:
+    if a.opportunities is None:
+        if a.cutoffs is not None:
+            raise ValueError("unknown option --cutoffs")
+        if a.opportunity_columns is not None:
+            raise ValueError("unknown option --opportunity-columns")
+    elif a.cutoffs is None:
         raise ValueError("missing --cutoffs")
     cutoffs = strictly_increasing(a.cutoffs, 1, 240, "cutoffs") if a.cutoffs is not None else []
+    if a.opportunities is not None and not a.opportunity_columns:
+        raise ValueError("missing --opportunity-columns")
     n_dests, n_dep, unreach, stream = read_stream(a.stream)
     idx = [percentile_index(n_dep, p) for p in pcts]
     opp = {}

@@ -29,6 +29,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <pthread.h>
@@ -226,6 +227,43 @@ struct csv_table {
   }
 };
 
+std::vector<std::string> parse_csv_line(std::string_view line) {
+  auto row = std::vector<std::string>{};
+  while (true) {
+    auto& field = row.emplace_back();
+    if (line.starts_with('"')) {
+      line.remove_prefix(1U);
+      while (true) {
+        auto const quote = line.find('"');
+        if (quote == std::string_view::npos) {
+          throw std::runtime_error("unclosed quoted CSV field");
+        }
+        field.append(line.substr(0U, quote));
+        line.remove_prefix(quote + 1U);
+        if (!line.starts_with('"')) {
+          break;
+        }
+        field.push_back('"');
+        line.remove_prefix(1U);
+      }
+    } else {
+      auto const field_view = line.substr(0U, line.find(','));
+      if (field_view.find('"') != std::string_view::npos) {
+        throw std::runtime_error("quote in unquoted CSV field");
+      }
+      field = field_view;
+      line.remove_prefix(field_view.size());
+    }
+    if (line.empty()) {
+      return row;
+    }
+    if (!line.starts_with(',')) {
+      throw std::runtime_error("expected comma after quoted CSV field");
+    }
+    line.remove_prefix(1U);
+  }
+}
+
 csv_table read_csv(fs::path const& p) {
   auto in = std::ifstream{p};
   if (!in) {
@@ -241,8 +279,7 @@ csv_table read_csv(fs::path const& p) {
     if (line.empty()) {
       continue;
     }
-    auto parts = split(line, ',');
-    auto row = std::vector<std::string>(parts.begin(), parts.end());
+    auto row = parse_csv_line(line);
     if (first) {
       t.header_ = std::move(row);
       first = false;
@@ -251,6 +288,41 @@ csv_table read_csv(fs::path const& p) {
     }
   }
   return t;
+}
+
+struct opportunity_data {
+  std::vector<std::vector<double>> values_;
+  std::vector<std::string> names_;
+};
+
+opportunity_data read_opportunities(args const& a, std::uint32_t n_dests) {
+  auto const cols = a.str("opportunity-columns", "");
+  if (cols.empty()) {
+    throw std::runtime_error("missing --opportunity-columns");
+  }
+  auto const table = read_csv(a.str("opportunities"));
+  if (table.rows_.size() != n_dests) {
+    throw std::runtime_error(
+        fmt::format("--opportunities: {} rows, expected {} destinations",
+                    table.rows_.size(), n_dests));
+  }
+  auto out = opportunity_data{};
+  for (auto const name : split(cols, ',')) {
+    auto const col = table.col(name);
+    auto& values = out.values_.emplace_back();
+    values.reserve(n_dests);
+    for (auto const& row : table.rows_) {
+      auto const& token = row.at(col);
+      auto consumed = std::size_t{0U};
+      auto const value = std::stod(token, &consumed);
+      if (consumed != token.size()) {
+        throw std::runtime_error(fmt::format("bad number '{}'", token));
+      }
+      values.push_back(value);
+    }
+    out.names_.emplace_back(name);
+  }
+  return out;
 }
 
 // Points: CSV with lat,lon columns; row order defines the point index.
@@ -1499,43 +1571,38 @@ int cmd_r5r_reduce(args const& a) {
   }
   auto const n_dests = hdr[2];
   auto const n_deps = hdr[3];
+  if (n_deps == 0U) {
+    throw std::runtime_error("stream n_departures must be at least 1");
+  }
   auto departures = std::vector<std::int64_t>(n_deps);
   read_exact(departures.data(), 8U * n_deps, "departures");
   auto const percentiles = parse_strictly_increasing(a.str("percentiles", "50"),
                                                      1, 100, "percentiles");
   auto cutoffs_min = std::vector<int>{};
-  auto opportunities = std::vector<std::vector<double>>{};
-  auto names = std::vector<std::string>{};
+  auto opportunities = opportunity_data{};
   auto decay_spec = std::string{"step"};
   if (a.has("opportunities")) {
     cutoffs_min =
         parse_strictly_increasing(a.str("cutoffs"), 1, 240, "cutoffs");
     decay_spec = a.str("decay", "step");
-    auto const table = read_csv(a.str("opportunities"));
-    auto const cols = a.str("opportunity-columns");
-    for (auto const c : split(cols, ',')) {
-      auto const col = table.col(c);
-      auto v = std::vector<double>{};
-      for (auto const& row : table.rows_) {
-        v.push_back(std::stod(row.at(col)));
-      }
-      if (v.size() != n_dests) {
-        throw std::runtime_error(
-            "--opportunities: row count differs from the stream");
-      }
-      names.emplace_back(c);
-      opportunities.push_back(std::move(v));
-    }
+    opportunities = read_opportunities(a, n_dests);
   }
   a.check_all_used();
-  auto out = r5r_output{dir,         n_dests,    n_deps,        percentiles,
-                        cutoffs_min, decay_spec, opportunities, names};
+  auto out = r5r_output{dir,
+                        n_dests,
+                        n_deps,
+                        percentiles,
+                        cutoffs_min,
+                        decay_spec,
+                        opportunities.values_,
+                        opportunities.names_};
   auto const block = static_cast<std::size_t>(n_deps) * n_dests;
   // optional transfers (u8) and egress-stop (u32) blocks, read and discarded
   auto const extra =
       ((flags & 1U) ? block : 0U) + ((flags & 2U) ? 4U * block : 0U);
   auto tail = std::vector<char>(extra);
   auto const read_origins = [&](auto const type_tag) {
+    auto seen = std::unordered_set<std::uint32_t>{};
     using T = std::decay_t<decltype(type_tag)>;
     auto buf = std::vector<T>(block);
     while (true) {
@@ -1548,6 +1615,10 @@ int cmd_r5r_reduce(args const& a) {
         throw std::runtime_error(fmt::format(
             "truncated stream: {} trailing byte(s), not a complete origin id",
             in.gcount()));
+      }
+      if (!seen.insert(o).second) {
+        throw std::runtime_error(
+            fmt::format("duplicate stream record for origin {}", o));
       }
       read_exact(buf.data(), block * sizeof(T), "travel-time block");
       read_exact(tail.data(), extra, "transfer / egress-stop block");
@@ -1676,11 +1747,16 @@ int cmd_route(args const& a) {
   // Optional explicit origin subset (comma-separated indices), else the range.
   auto origin_list = std::vector<std::uint32_t>{};
   if (a.has("origin-list")) {
+    auto seen = std::unordered_set<std::uint32_t>{};
     auto const list = a.str("origin-list");  // keep alive: split returns views
     for (auto const x : split(list, ',')) {
       auto const v = parse_num<std::uint32_t>(x);
       if (v >= n_origins) {
         throw std::runtime_error("origin-list entry out of range");
+      }
+      if (!seen.insert(v).second) {
+        throw std::runtime_error(
+            fmt::format("duplicate origin-list entry {}", v));
       }
       origin_list.push_back(v);
     }
@@ -1794,8 +1870,7 @@ int cmd_route(args const& a) {
   }
   auto percentiles = std::vector<int>{};
   auto cutoffs_min = std::vector<int>{};
-  auto opportunities = std::vector<std::vector<double>>{};
-  auto opportunity_names = std::vector<std::string>{};
+  auto opportunities = opportunity_data{};
   auto decay_spec = std::string{"step"};
   if (emit_r5r) {
     percentiles = parse_strictly_increasing(a.str("percentiles", "50"), 1, 100,
@@ -1804,22 +1879,7 @@ int cmd_route(args const& a) {
       cutoffs_min =
           parse_strictly_increasing(a.str("cutoffs"), 1, 240, "cutoffs");
       decay_spec = a.str("decay", "step");
-      auto const table = read_csv(a.str("opportunities"));
-      auto const cols = a.str("opportunity-columns");
-      for (auto const c : split(cols, ',')) {
-        auto const col = table.col(c);
-        auto v = std::vector<double>{};
-        for (auto const& row : table.rows_) {
-          v.push_back(std::stod(row.at(col)));
-        }
-        if (v.size() != n_dests) {
-          throw std::runtime_error(
-              fmt::format("--opportunities: {} rows, expected {} destinations",
-                          v.size(), n_dests));
-        }
-        opportunity_names.emplace_back(c);
-        opportunities.push_back(std::move(v));
-      }
+      opportunities = read_opportunities(a, n_dests);
     }
   }
   if (emit_r5r) {
@@ -1896,7 +1956,7 @@ int cmd_route(args const& a) {
   auto r5r = std::optional<r5r_output>{};
   if (emit_r5r) {
     r5r.emplace(r5r_dir, n_dests, dep_count, percentiles, cutoffs_min,
-                decay_spec, opportunities, opportunity_names);
+                decay_spec, opportunities.values_, opportunities.names_);
   }
 
   // The travel-time buffer uses the narrowest record type (u8 for caps <= 253,
