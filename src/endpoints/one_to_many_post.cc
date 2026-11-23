@@ -12,7 +12,7 @@ namespace motis::ep {
 api::oneToManyPost_response one_to_many_post::operator()(
     api::OneToManyParams const& query) const {
   return one_to_many_handle_request(config_, query, w_, l_, elevations_,
-                                    metrics_);
+                                    metrics_, car_destination_matches_);
 }
 
 api::OneToManyIntermodalResponse one_to_many_intermodal_post::operator()(

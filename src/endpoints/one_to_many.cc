@@ -1,5 +1,7 @@
 #include "motis/endpoints/one_to_many.h"
 
+#include "motis/endpoints/car_destination_match_cache.h"
+
 #include <algorithm>
 #include <chrono>
 #include <limits>
@@ -43,7 +45,8 @@ api::oneToMany_response one_to_many_direct(
     api::PedestrianProfileEnum const pedestrian_profile,
     api::ElevationCostsEnum const elevation_costs,
     osr::elevation_storage const* elevations_,
-    bool const with_distance) {
+    bool const with_distance,
+    car_destination_match_cache* const car_destination_matches) {
   auto const max_many = config.get_limits().onetomany_max_many_;
   auto const max_direct_time_limit =
       config.get_limits().street_routing_max_direct_seconds_;
@@ -67,14 +70,11 @@ api::oneToMany_response one_to_many_direct(
       "mode {} not supported for one-to-many", fmt::streamed(mode));
 
   auto const profile = to_profile(mode, pedestrian_profile, elevation_costs);
-  auto const paths = osr::route(
-      to_profile_parameters(profile, params), w, l, profile, one, many,
-      std::chrono::seconds{
-          static_cast<std::chrono::seconds::rep>(max_direct_time)},
-      dir, max_matching_distance, nullptr, nullptr, elevations_,
-      [&](auto&&) { return with_distance; });
-
-  return utl::to_vec(paths, [&](std::optional<osr::path> const& p) {
+  auto const pp = to_profile_parameters(profile, params);
+  auto const max_duration = std::chrono::seconds{
+      static_cast<std::chrono::seconds::rep>(max_direct_time)};
+  auto const reconstruct = [&](osr::path const&) { return with_distance; };
+  auto const duration = [&](std::optional<osr::path> const& p) {
     return p
         .transform([&](osr::path const& x) {
           return api::Duration{.duration_ = x.duration_.count(),
@@ -83,7 +83,24 @@ api::oneToMany_response one_to_many_direct(
                                                 : std::nullopt};
         })
         .value_or(api::Duration{});
-  });
+  };
+  if (profile == osr::search_profile::kCar && car_destination_matches) {
+    if (auto const prepared =
+            car_destination_matches->get(many, dir, max_matching_distance);
+        prepared) {
+      auto root = osr::match_result{};
+      l.match<osr::car>(std::get<osr::car::parameters>(pp), one, false, dir,
+                        max_matching_distance, nullptr, root);
+      auto const state = osr::route_one_to_many(
+          pp, w, l, profile, one, many, root[osr::match_idx_t{0U}], *prepared,
+          max_duration, dir, nullptr, nullptr, elevations_, reconstruct);
+      return utl::to_vec(state->results(), duration);
+    }
+  }
+  return utl::to_vec(osr::route(pp, w, l, profile, one, many, max_duration, dir,
+                                max_matching_distance, nullptr, nullptr,
+                                elevations_, reconstruct),
+                     duration);
 }
 
 double duration_to_seconds(n::duration_t const d) { return 60 * d.count(); }
@@ -221,7 +238,7 @@ api::oneToMany_response one_to_many::operator()(
     boost::urls::url_view const& url) const {
   auto const query = api::oneToMany_params{url.params()};
   return one_to_many_handle_request(config_, query, w_, l_, elevations_,
-                                    metrics_);
+                                    metrics_, car_destination_matches_);
 }
 
 template <typename Endpoint, typename Query>

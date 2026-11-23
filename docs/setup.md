@@ -121,6 +121,7 @@ limits:
   plan_max_search_window_minutes: 5760 # maximum (minutes) for searchWindow parameter (seconds), highest possible value: 21600 (15 days)
   stops_max_results: 8192         # maximum number of stops returned in /map/stops
   onetomany_max_many: 128         # maximum accepted number of many locations for one-to-many requests
+  onetomany_car_match_cache_max_bytes: 0  # retained CAR destination matches for up to eight ordered lists (zero disables reuse)
   onetoall_max_results: 65535     # maximum number of one-to-all results that can be requested
   onetoall_max_travel_minutes: 90 # maximum travel duration for one-to-all query that can be requested
   routing_max_timeout_seconds: 90 # maximum duration a routing query may take

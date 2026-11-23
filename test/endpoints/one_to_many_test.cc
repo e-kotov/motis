@@ -5,6 +5,7 @@
 #endif
 
 #include <chrono>
+#include <future>
 #include <optional>
 #include <vector>
 
@@ -15,6 +16,7 @@
 #include "motis-api/motis-api.h"
 
 #include "motis/config.h"
+#include "motis/endpoints/car_destination_match_cache.h"
 #include "motis/endpoints/one_to_many.h"
 #include "motis/endpoints/one_to_many_post.h"
 #include "motis/endpoints/routing.h"
@@ -975,4 +977,63 @@ TEST(one_to_many, street_routing) {
       EXPECT_NEAR(post_distance, plan_distance + 1.5, 1.5);
     }
   }
+}
+
+TEST(one_to_many, street_car_prepared_matches) {
+  auto [d, _config] =
+      get_test_case<test_case::FFM_one_to_many_no_osr_footpath>();
+  auto const stock = one_to_many_v1_get(d);
+  auto const hits_before = d.metrics_->car_snap_cache_hits_.Value();
+  auto const misses_before = d.metrics_->car_snap_cache_misses_.Value();
+  auto cache = car_destination_match_cache{*d.l_, 1024U * 1024U, *d.metrics_};
+  auto candidate = stock;
+  candidate.car_destination_matches_ = &cache;
+
+  auto const make_query = [](std::string_view origin, std::string_view many,
+                             int radius, bool backward) {
+    return fmt::format(
+        "/api/v1/one-to-many?one={}&many={}&mode=CAR&max=10800"
+        "&maxMatchingDistance={}&arriveBy={}&withDistance=true",
+        origin, many, radius, backward);
+  };
+  auto const equal = [](auto const& expected, auto const& actual) {
+    ASSERT_EQ(expected.size(), actual.size());
+    for (auto i = 0U; i != expected.size(); ++i) {
+      EXPECT_EQ(expected[i].duration_, actual[i].duration_) << i;
+      EXPECT_EQ(expected[i].distance_, actual[i].distance_) << i;
+    }
+  };
+
+  auto const from = "49.8722439;8.6320624"sv;
+  auto const many = "49.872855;8.632008,0;0,49.872855;8.632008,49.872504;8.628988"sv;
+  auto const first = make_query(from, many, 250, false);
+  auto const expected = stock(first);
+  ASSERT_EQ(expected.size(), 4U);
+  ASSERT_TRUE(expected[0].duration_.has_value());
+  ASSERT_TRUE(expected[0].distance_.has_value());
+  EXPECT_FALSE(expected[1].duration_.has_value());
+  EXPECT_EQ(expected[0].duration_, expected[2].duration_);
+
+  for (auto const& query :
+       {first, make_query(from, many, 25, false),
+        make_query(from, many, 250, true),
+        make_query(from, "49.872855;8.632008;0,0;0", 250, false),
+        make_query(from, "0;0,49.872855;8.632008", 250, false)}) {
+    equal(stock(query), candidate(query));
+  }
+  EXPECT_EQ(d.metrics_->car_snap_cache_misses_.Value() - misses_before, 5.0);
+
+  auto const other = make_query("49.872504;8.628988", many, 250, false);
+  auto const other_expected = stock(other);
+  auto results = std::vector<std::future<api::oneToMany_response>>{};
+  for (auto i = 0; i != 4; ++i) {
+    results.emplace_back(std::async(std::launch::async, [&] {
+      return candidate(other);
+    }));
+  }
+  for (auto& result : results) {
+    equal(other_expected, result.get());
+  }
+  EXPECT_EQ(d.metrics_->car_snap_cache_hits_.Value() - hits_before, 4.0);
+  EXPECT_EQ(d.metrics_->car_snap_cache_misses_.Value() - misses_before, 5.0);
 }

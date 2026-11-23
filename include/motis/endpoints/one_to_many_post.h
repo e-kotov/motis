@@ -22,6 +22,7 @@ struct one_to_many_post {
   osr::lookup const& l_;
   osr::elevation_storage const* elevations_;
   metrics_registry* metrics_;
+  car_destination_match_cache* car_destination_matches_{nullptr};
 };
 
 struct one_to_many_intermodal_post {

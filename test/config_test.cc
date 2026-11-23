@@ -104,6 +104,7 @@ limits:
   plan_max_search_window_minutes: 5760
   stops_max_results: 8192
   onetomany_max_many: 128
+  onetomany_car_match_cache_max_bytes: 0
   onetoall_max_results: 65535
   onetoall_max_travel_minutes: 90
   routing_max_timeout_seconds: 90

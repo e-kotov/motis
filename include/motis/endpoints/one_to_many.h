@@ -42,7 +42,8 @@ api::oneToMany_response one_to_many_direct(
     api::PedestrianProfileEnum,
     api::ElevationCostsEnum,
     osr::elevation_storage const*,
-    bool with_distance);
+    bool with_distance,
+    car_destination_match_cache* = nullptr);
 
 template <typename Params>
 api::oneToMany_response one_to_many_handle_request(
@@ -51,7 +52,8 @@ api::oneToMany_response one_to_many_handle_request(
     osr::ways const& w,
     osr::lookup const& l,
     osr::elevation_storage const* elevations,
-    metrics_registry* metrics) {
+    metrics_registry* metrics,
+    car_destination_match_cache* car_destination_matches) {
   metrics->one_to_many_requests_.Increment();
   // required field with default value, not std::optional
   static_assert(std::is_same_v<decltype(query.withDistance_), bool>);
@@ -75,7 +77,8 @@ api::oneToMany_response one_to_many_handle_request(
       config, w, l, query.mode_, *one, many, query.max_, max_matching_distance,
       query.arriveBy_ ? osr::direction::kBackward : osr::direction::kForward,
       get_osr_parameters(query), api::PedestrianProfileEnum::FOOT,
-      query.elevationCosts_, elevations, query.withDistance_);
+      query.elevationCosts_, elevations, query.withDistance_,
+      car_destination_matches);
 }
 
 template <typename Endpoint, typename Query>
@@ -93,6 +96,7 @@ struct one_to_many {
   osr::lookup const& l_;
   osr::elevation_storage const* elevations_;
   metrics_registry* metrics_;
+  car_destination_match_cache* car_destination_matches_{nullptr};
 };
 
 struct one_to_many_intermodal {

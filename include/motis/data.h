@@ -26,6 +26,7 @@
 
 namespace motis {
 
+struct car_destination_match_cache;
 struct elevators;
 
 template <typename T>
@@ -103,7 +104,7 @@ struct data {
                     elevator_nodes_, elevator_osm_mapping_, shapes_,
                     railviz_static_, matches_, way_matches_, rt_, gbfs_,
                     odm_bounds_, ride_sharing_bounds_, flex_areas_, metrics_,
-                    auser_
+                    auser_, car_destination_matches_
 #if defined(NIGIRI_CUDA)
                     ,
                     gpu_tt_, gpu_pool_
@@ -124,6 +125,7 @@ struct data {
   ptr<osr::ways> w_;
   ptr<osr::platforms> pl_;
   ptr<osr::lookup> l_;
+  ptr<car_destination_match_cache> car_destination_matches_;
   ptr<osr::elevation_storage> elevations_;
   cista::wrapped<nigiri::timetable> tt_;
   cista::wrapped<nigiri::routing::tb::tb_data> tbd_;

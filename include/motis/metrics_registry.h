@@ -31,6 +31,11 @@ struct metrics_registry {
   prometheus::Registry registry_;
   prometheus::Counter& routing_requests_;
   prometheus::Counter& one_to_many_requests_;
+  prometheus::Counter& car_snap_cache_hits_;
+  prometheus::Counter& car_snap_cache_misses_;
+  prometheus::Counter& car_snap_cache_coordinates_;
+  prometheus::Counter& car_snap_cache_preparation_seconds_;
+  prometheus::Gauge& car_snap_cache_bytes_;
   prometheus::Counter& routing_journeys_found_;
   prometheus::Family<prometheus::Histogram>& routing_odm_journeys_found_;
   prometheus::Histogram& routing_odm_journeys_found_blacklist_;
