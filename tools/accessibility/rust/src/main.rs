@@ -212,6 +212,9 @@ enum Cmd {
         max_travel: u16,
         #[arg(long, default_value_t = 0)]
         pre_seconds: u32,
+        /// stock maxTransfers (Nigiri semantics: up to max_transfers + 1 vehicles)
+        #[arg(long)]
+        max_transfers: Option<u8>,
         #[arg(long)]
         out: PathBuf,
         #[arg(long)]
@@ -408,9 +411,9 @@ fn main() -> Result<()> {
             let info = stops_mode::stop_summary(&stream, &act, &out)?;
             println!("{}", serde_json::to_string_pretty(&info)?);
         }
-        Cmd::MotisOneToAllQueries { stops, origins, tag, dep_start_unix_minutes, dep_count, dep_step, max_travel, pre_seconds, out, map } => {
+        Cmd::MotisOneToAllQueries { stops, origins, tag, dep_start_unix_minutes, dep_count, dep_step, max_travel, pre_seconds, max_transfers, out, map } => {
             let o = stops_mode::read_stop_list(&origins)?;
-            let n = stops_mode::one_to_all_queries(&stops, &o, &tag, &departures(dep_start_unix_minutes, dep_count, dep_step), max_travel, pre_seconds, &out, &map)?;
+            let n = stops_mode::one_to_all_queries(&stops, &o, &tag, &departures(dep_start_unix_minutes, dep_count, dep_step), max_travel, pre_seconds, max_transfers, &out, &map)?;
             eprintln!("motis-one-to-all-queries: {} queries", n);
         }
         Cmd::FromMotisOneToAll { map, responses, stops, tag, n_origins, dep_start_unix_minutes, dep_count, dep_step, max_travel, out } => {

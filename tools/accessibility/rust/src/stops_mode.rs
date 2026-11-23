@@ -79,7 +79,7 @@ fn urlenc(s: &str) -> String {
 }
 
 /// queries.txt for stock one-to-all from stops; map.csv: line,origin,departure_index.
-pub fn one_to_all_queries(stops: &Path, origins: &[u32], tag: &str, departures: &[i64], max_travel: u16, pre_seconds: u32, out: &Path, map: &Path) -> Result<usize> {
+pub fn one_to_all_queries(stops: &Path, origins: &[u32], tag: &str, departures: &[i64], max_travel: u16, pre_seconds: u32, max_transfers: Option<u8>, out: &Path, map: &Path) -> Result<usize> {
     let t = Table::read(stops)?;
     let id = t.col("id")?;
     let ids: Vec<String> = t.rows.iter().map(|r| r[id].to_string()).collect();
@@ -89,7 +89,8 @@ pub fn one_to_all_queries(stops: &Path, origins: &[u32], tag: &str, departures: 
     let mut line = 0;
     for (oi, &s) in origins.iter().enumerate() {
         for (di, &dep) in departures.iter().enumerate() {
-            writeln!(w, "/api/v6/one-to-all?one={}&time={}&maxTravelTime={}&maxPreTransitTime={}", urlenc(&format!("{}_{}", tag, ids[s as usize])), iso(dep), max_travel, pre_seconds)?;
+            let mt = max_transfers.map(|m| format!("&maxTransfers={}", m)).unwrap_or_default();
+            writeln!(w, "/api/v6/one-to-all?one={}&time={}&maxTravelTime={}&maxPreTransitTime={}{}", urlenc(&format!("{}_{}", tag, ids[s as usize])), iso(dep), max_travel, pre_seconds, mt)?;
             writeln!(m, "{},{},{}", line, oi, di)?;
             line += 1;
         }
