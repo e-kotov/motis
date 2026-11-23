@@ -672,15 +672,18 @@ int cmd_route(args const& a) {
   auto write_ns = std::atomic_uint64_t{0U};
   auto const t_route = clock_t_::now();
 
-  auto worker = [&]() {
+  // The travel-time buffer uses the narrowest record type (u8 for caps <= 253, else
+  // u16): the egress loop is memory-bound and a u16 buffer slowed it by ~70 %.
+  auto worker_t = [&](auto const type_tag) {
+    using tt_t = std::decay_t<decltype(type_tag)>;
+    constexpr auto kUnreachableT = std::numeric_limits<tt_t>::max();
     auto const block = static_cast<std::size_t>(dep_count) * n_dests;
-    auto tt_buf = std::vector<std::uint16_t>(block);
-    auto tt8_buf = std::vector<std::uint8_t>(tt16 ? 0U : block);
+    auto tt_buf = std::vector<tt_t>(block);
     auto tr_buf = std::vector<std::uint8_t>(with_transfers ? block : 0U);
     auto via_buf = std::vector<std::uint32_t>(with_via ? block : 0U);
     for (auto oi = next++; oi < origin_list.size(); oi = next++) {
       auto const o = origin_list[oi];
-      std::fill(begin(tt_buf), end(tt_buf), kUnreachable16);
+      std::fill(begin(tt_buf), end(tt_buf), kUnreachableT);
       std::fill(begin(tr_buf), end(tr_buf), kUnreachable);
       std::fill(begin(via_buf), end(via_buf), kNoStop);
       auto starts = std::vector<n::routing::offset>{};
@@ -702,7 +705,7 @@ int cmd_route(args const& a) {
             auto const d = direct.value_[j];
             auto const m = direct.minutes_[j];
             if (m <= max_travel && m < row_tt[d]) {
-              row_tt[d] = m;
+              row_tt[d] = static_cast<tt_t>(m);
               if (row_tr) row_tr[d] = kDirectWalk;
               if (row_via) row_via[d] = kNoStop;
             }
@@ -739,7 +742,7 @@ int cmd_route(args const& a) {
                 start_time, max_transfers);
             if (f.k_ != std::numeric_limits<std::uint8_t>::max() &&
                 f.duration_ >= 0 && f.duration_ <= max_travel) {
-              row_tt[s] = static_cast<std::uint16_t>(f.duration_);
+              row_tt[s] = static_cast<tt_t>(f.duration_);
               if (row_tr) row_tr[s] = f.k_;
             }
           }
@@ -782,7 +785,7 @@ int cmd_route(args const& a) {
                   (row_tr != nullptr && total == row_tt[d] &&
                    row_tr[d] != kDirectWalk && transfers < row_tr[d]);
               if (better) {
-                row_tt[d] = static_cast<std::uint16_t>(total);
+                row_tt[d] = static_cast<tt_t>(total);
                 if (row_tr) row_tr[d] = transfers;
                 if (row_via) row_via[d] = s;
               }
@@ -797,18 +800,8 @@ int cmd_route(args const& a) {
       if (!discard) {
         auto const lock = std::lock_guard{write_mutex};
         out.write(reinterpret_cast<char const*>(&o), sizeof(o));
-        if (tt16) {
-          out.write(reinterpret_cast<char const*>(tt_buf.data()),
-                    static_cast<std::streamsize>(tt_buf.size() * 2U));
-        } else {
-          for (auto i = 0U; i != tt_buf.size(); ++i) {
-            tt8_buf[i] = tt_buf[i] == kUnreachable16
-                             ? kUnreachable
-                             : static_cast<std::uint8_t>(tt_buf[i]);
-          }
-          out.write(reinterpret_cast<char const*>(tt8_buf.data()),
-                    static_cast<std::streamsize>(tt8_buf.size()));
-        }
+        out.write(reinterpret_cast<char const*>(tt_buf.data()),
+                  static_cast<std::streamsize>(tt_buf.size() * sizeof(tt_t)));
         if (with_transfers) {
           out.write(reinterpret_cast<char const*>(tr_buf.data()),
                     static_cast<std::streamsize>(tr_buf.size()));
@@ -821,6 +814,13 @@ int cmd_route(args const& a) {
       write_ns += static_cast<std::uint64_t>(
           std::chrono::duration_cast<std::chrono::nanoseconds>(clock_t_::now() - tw)
               .count());
+    }
+  };
+  auto worker = [&]() {
+    if (tt16) {
+      worker_t(std::uint16_t{});
+    } else {
+      worker_t(std::uint8_t{});
     }
   };
   auto threads = std::vector<std::thread>{};
