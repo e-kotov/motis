@@ -1,0 +1,94 @@
+# [fork-ci-only] CI for pull requests on the e-kotov/motis fork, on GitHub-hosted
+# ubuntu-latest runners only (no self-hosted runners). Drop this file / commit before
+# proposing a change upstream. Steps that need tools/accessibility run only where it exists.
+name: fork-ci
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: fork-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  formatting:
+    runs-on: ubuntu-latest
+    container: ghcr.io/motis-project/docker-cpp-build
+    steps:
+      - uses: actions/checkout@v4
+      - name: clang-format-21 (include, src, test, tools/accessibility)
+        run: |
+          git config --global --add safe.directory "$PWD"
+          dirs="include src test"
+          [ -d tools/accessibility ] && dirs="$dirs tools/accessibility"
+          find $dirs -type f \( -name '*.cc' -o -name '*.h' \) -not -path '*/rust/*' -print0 | xargs -0 clang-format-21 -i
+          git diff --stat
+          git diff --exit-code
+
+  python-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: r5r_reference.py --selftest (hand-ranked percentile boundaries)
+        run: |
+          if [ -f tools/accessibility/r5r_reference.py ] && grep -q -- '--selftest' tools/accessibility/r5r_reference.py; then
+            python3 tools/accessibility/r5r_reference.py --selftest
+          else
+            echo "not on this branch"
+          fi
+      - name: r5r_test.py (reference; percentile validation, stream truncation)
+        run: |
+          if [ -f tools/accessibility/r5r_test.py ]; then
+            python3 tools/accessibility/r5r_test.py "$RUNNER_TEMP/r5r-test"
+          else
+            echo "not on this branch"
+          fi
+      - name: vrtt_test.py --synthetic (validator negative tests)
+        run: |
+          if [ -f tools/accessibility/vrtt_test.py ] && grep -q -- '--synthetic' tools/accessibility/vrtt_test.py; then
+            python3 tools/accessibility/vrtt_test.py --synthetic "$RUNNER_TEMP"
+          else
+            echo "not on this branch"
+          fi
+
+  build-and-test:
+    runs-on: ubuntu-latest
+    container: ghcr.io/motis-project/docker-cpp-build
+    timeout-minutes: 340
+    env:
+      # pkg clones dependencies via git@github.com URLs; use HTTPS on hosted runners
+      GIT_CONFIG_COUNT: 1
+      GIT_CONFIG_KEY_0: "url.https://github.com/.insteadOf"
+      GIT_CONFIG_VALUE_0: "git@github.com:"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Runner resources
+        run: nproc; free -g; df -h . /
+      - name: CMake (linux-amd64-release)
+        run: |
+          git config --global --add safe.directory '*'
+          cmake -G Ninja -S . -B build --preset=linux-amd64-release
+          df -h .
+      - name: Build motis-test (and motis-accessibility where present)
+        run: |
+          targets=motis-test
+          grep -q 'motis-accessibility' CMakeLists.txt && targets="$targets motis-accessibility"
+          cmake --build build --target $targets --parallel "$(nproc)"
+          df -h .
+      - name: motis-test
+        run: build/motis-test
+      - name: r5r_test.py with r5r-reduce (where present)
+        run: |
+          if [ -f tools/accessibility/r5r_test.py ] && [ -x build/motis-accessibility ]; then
+            python3 tools/accessibility/r5r_test.py "$RUNNER_TEMP/r5r-test-bin" build/motis-accessibility
+          else
+            echo "not on this branch"
+          fi
+      - name: motis-accessibility r5r-selftest (where present)
+        run: |
+          if [ -x build/motis-accessibility ] && grep -q 'r5r-selftest' tools/accessibility/main.cc; then
+            build/motis-accessibility r5r-selftest --out "$RUNNER_TEMP/r5r-selftest"
+          else
+            echo "not on this branch"
+          fi
