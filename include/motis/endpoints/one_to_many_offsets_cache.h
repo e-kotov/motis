@@ -10,8 +10,12 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <tuple>
+#include <type_traits>
 #include <unordered_map>
 #include <vector>
+
+#include "cista/reflection/to_tuple.h"
 
 #include "osr/location.h"
 #include "osr/routing/profile.h"
@@ -36,8 +40,6 @@ namespace motis::ep {
 // not evict: once full, further places are computed as before and not stored.
 struct one_to_many_offsets_cache {
   struct key {
-    bool operator==(key const&) const = default;
-
     osr::location place_;
     osr::direction dir_;
     std::vector<api::ModeEnum> modes_;
@@ -48,25 +50,74 @@ struct one_to_many_offsets_cache {
     double max_matching_distance_;
   };
 
+  // Floating-point inputs are compared and hashed by the same canonical bit
+  // pattern (-0.0 as +0.0, every NaN as one NaN): equal keys always hash
+  // equally. Exact, not osr::location's tolerant coordinate equality: a
+  // slightly different coordinate is a different street search.
+  static std::uint64_t canonical(double const x) {
+    if (x == 0.0) {
+      return 0U;
+    }
+    if (x != x) {
+      return 0x7ff8000000000000ULL;
+    }
+    return std::bit_cast<std::uint64_t>(x);
+  }
+  static std::uint64_t canonical(float const x) {
+    if (x == 0.0F) {
+      return 0U;
+    }
+    if (x != x) {
+      return 0x7fc00000U;
+    }
+    return std::bit_cast<std::uint32_t>(x);
+  }
+  template <typename T>
+  static std::uint64_t canonical(T const& x) {
+    if constexpr (std::is_enum_v<T>) {
+      return static_cast<std::uint64_t>(x);
+    } else {
+      static_assert(std::is_integral_v<T>);
+      return static_cast<std::uint64_t>(x);
+    }
+  }
+
+  // Calls f(canonical value) for every input of the street search, in a fixed
+  // order: the single definition behind both equality and hash.
+  template <typename F>
+  static void for_each_input(key const& k, F&& f) {
+    f(canonical(k.place_.pos_.lat_));
+    f(canonical(k.place_.pos_.lng_));
+    f(static_cast<std::uint64_t>(to_idx(k.place_.lvl_)));
+    f(canonical(k.dir_));
+    f(static_cast<std::uint64_t>(k.modes_.size()));
+    for (auto const m : k.modes_) {
+      f(canonical(m));
+    }
+    std::apply([&](auto const&... x) { (f(canonical(x)), ...); },
+               cista::to_tuple(k.osr_params_));
+    f(canonical(k.pedestrian_profile_));
+    f(canonical(k.elevation_costs_));
+    f(static_cast<std::uint64_t>(k.max_.count()));
+    f(canonical(k.max_matching_distance_));
+  }
+
+  struct key_eq {
+    bool operator()(key const& a, key const& b) const {
+      auto va = std::vector<std::uint64_t>{};
+      auto vb = std::vector<std::uint64_t>{};
+      for_each_input(a, [&](std::uint64_t const x) { va.push_back(x); });
+      for_each_input(b, [&](std::uint64_t const x) { vb.push_back(x); });
+      return va == vb;
+    }
+  };
+
   struct key_hash {
     std::size_t operator()(key const& k) const noexcept {
       auto h = std::size_t{0xcbf29ce484222325ULL};
-      auto const mix = [&](std::uint64_t const x) {
+      for_each_input(k, [&](std::uint64_t const x) {
         h ^= x + 0x9e3779b97f4a7c15ULL + (h << 6U) + (h >> 2U);
-      };
-      mix(std::bit_cast<std::uint64_t>(k.place_.pos_.lat_));
-      mix(std::bit_cast<std::uint64_t>(k.place_.pos_.lng_));
-      mix(to_idx(k.place_.lvl_));
-      mix(static_cast<std::uint64_t>(k.dir_));
-      for (auto const m : k.modes_) {
-        mix(static_cast<std::uint64_t>(m));
-      }
-      mix(std::bit_cast<std::uint32_t>(k.osr_params_.pedestrian_speed_));
-      mix(std::bit_cast<std::uint32_t>(k.osr_params_.cycling_speed_));
-      mix(static_cast<std::uint64_t>(k.pedestrian_profile_));
-      mix(static_cast<std::uint64_t>(k.elevation_costs_));
-      mix(static_cast<std::uint64_t>(k.max_.count()));
-      mix(std::bit_cast<std::uint64_t>(k.max_matching_distance_));
+      });
       return h;
     }
   };
@@ -121,7 +172,7 @@ struct one_to_many_offsets_cache {
 
 private:
   mutable std::shared_mutex mutex_;
-  std::unordered_map<key, offsets_t, key_hash> entries_;
+  std::unordered_map<key, offsets_t, key_hash, key_eq> entries_;
 };
 
 }  // namespace motis::ep

@@ -5,6 +5,7 @@
 #endif
 
 #include <chrono>
+#include <cmath>
 #include <optional>
 #include <vector>
 
@@ -1049,4 +1050,64 @@ TEST(one_to_many, offsets_cache_matches_uncached) {
   EXPECT_EQ(5U * 11U, d.one_to_many_offsets_cache_->size());
   EXPECT_EQ(5U * 11U, d.one_to_many_offsets_cache_->misses_.load());
   EXPECT_EQ(7U * 11U, d.one_to_many_offsets_cache_->hits_.load());
+}
+
+// Cache keys: equality and hash agree ((a == b) implies hash(a) == hash(b)),
+// coordinates are compared exactly (a coordinate one ulp away is a different
+// street search, even where osr::location's tolerant equality says equal),
+// and -0.0 / +0.0 are the same value.
+TEST(one_to_many, offsets_cache_key_equality_and_hash_agree) {
+  using cache = ep::one_to_many_offsets_cache;
+  auto const make = [](double const lat, double const lng) {
+    return cache::key{.place_ = osr::location{{lat, lng}, osr::level_t{}},
+                      .dir_ = osr::direction::kBackward,
+                      .modes_ = {api::ModeEnum::WALK},
+                      .osr_params_ = {},
+                      .pedestrian_profile_ = api::PedestrianProfileEnum::FOOT,
+                      .elevation_costs_ = api::ElevationCostsEnum::NONE,
+                      .max_ = std::chrono::seconds{900},
+                      .max_matching_distance_ = 250.0};
+  };
+  auto const eq = cache::key_eq{};
+  auto const hash = cache::key_hash{};
+
+  auto const a = make(50.0, 8.0);
+  auto const a_ulp = make(std::nextafter(50.0, 51.0), 8.0);
+  EXPECT_TRUE(a.place_.pos_ == a_ulp.place_.pos_);  // geo::latlng: tolerant
+  EXPECT_FALSE(eq(a, a_ulp));
+
+  auto const z_pos = make(50.0, 0.0);
+  auto const z_neg = make(50.0, -0.0);
+  EXPECT_TRUE(eq(z_pos, z_neg));
+  EXPECT_EQ(hash(z_pos), hash(z_neg));
+
+  auto p_pos = a;
+  auto p_neg = a;
+  p_pos.osr_params_.pedestrian_speed_ = 0.0F;
+  p_neg.osr_params_.pedestrian_speed_ = -0.0F;
+  EXPECT_TRUE(eq(p_pos, p_neg));
+  EXPECT_EQ(hash(p_pos), hash(p_neg));
+
+  auto other_params = a;
+  other_params.osr_params_.hgv_trailer_ = !other_params.osr_params_.hgv_trailer_;
+  auto other_max = a;
+  other_max.max_ = std::chrono::seconds{901};
+  auto other_level = a;
+  other_level.place_.lvl_ = osr::level_t{-1.0F};
+  EXPECT_FALSE(eq(a, other_params));
+  EXPECT_FALSE(eq(a, other_max));
+  EXPECT_FALSE(eq(a, other_level));
+
+  auto const keys = std::vector<cache::key>{
+      a, a_ulp, z_pos, z_neg, p_pos, p_neg, other_params, other_max, other_level,
+      make(std::nextafter(50.0, 49.0), 8.0), make(50.0, std::nextafter(8.0, 9.0))};
+  for (auto const& x : keys) {
+    EXPECT_TRUE(eq(x, x));
+    for (auto const& y : keys) {
+      EXPECT_EQ(eq(x, y), eq(y, x));
+      if (eq(x, y)) {
+        EXPECT_EQ(hash(x), hash(y));
+      }
+    }
+  }
 }

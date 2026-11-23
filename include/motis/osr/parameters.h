@@ -13,8 +13,6 @@
 namespace motis {
 
 struct osr_parameters {
-  bool operator==(osr_parameters const&) const = default;
-
   constexpr static auto const kFootSpeed = 1.2F;
   constexpr static auto const kWheelchairSpeed = 0.8F;
   constexpr static auto const kBikeSpeed = 4.2F;
