@@ -27,21 +27,22 @@ public:
                               metrics_registry& metrics)
       : lookup_{lookup}, max_bytes_{max_bytes}, metrics_{metrics} {}
 
-  // A null result requests normal routing. A non-null result contains one
-  // bucket per input coordinate, including empty buckets and duplicates.
+  bool can_prepare(std::vector<osr::location> const& destinations,
+                   double const radius) const {
+    return max_bytes_ != 0U && !destinations.empty() &&
+           std::isfinite(radius) && radius > 0.0 &&
+           std::ranges::all_of(destinations, [](osr::location const& location) {
+             return std::abs(location.pos_.lat()) <= 90.0 &&
+                    std::abs(location.pos_.lng()) <= 180.0;
+           });
+  }
+
+  // For inputs accepted by can_prepare, returns one bucket per coordinate.
+  // Empty buckets, order and duplicates are retained.
   std::shared_ptr<osr::match_result const> get(
       std::vector<osr::location> const& destinations,
       osr::direction const direction,
       double const radius) {
-    if (max_bytes_ == 0U || destinations.empty() || !std::isfinite(radius) ||
-        radius <= 0.0 ||
-        !std::ranges::all_of(destinations, [](osr::location const& location) {
-          return std::abs(location.pos_.lat()) <= 90.0 &&
-                 std::abs(location.pos_.lng()) <= 180.0;
-        })) {
-      return {};
-    }
-
     auto const start = std::chrono::steady_clock::now();
     {
       auto const lock = std::scoped_lock{mutex_};
@@ -63,13 +64,19 @@ public:
         std::chrono::duration<double>{std::chrono::steady_clock::now() - start}
             .count());
 
-    auto entry = preparation{destinations, direction, radius, prepared, 0U};
     auto const& m = *prepared;
-    entry.bytes_ = sizeof(preparation) + sizeof(osr::match_result) +
-                   entry.destinations_.capacity() * sizeof(osr::location) +
-                   bytes(m.begin_) + bytes(m.lvl_) + bytes(m.penalty_ref_) +
-                   bytes(m.dist_to_way_) + bytes(m.way_) + bytes(m.nodes_) +
-                   bytes(m.state_);
+    auto const payload = sizeof(preparation) + sizeof(osr::match_result) +
+                         bytes(m.begin_) + bytes(m.lvl_) +
+                         bytes(m.penalty_ref_) + bytes(m.dist_to_way_) +
+                         bytes(m.way_) + bytes(m.nodes_) + bytes(m.state_);
+    if (payload > max_bytes_ ||
+        destinations.size() > (max_bytes_ - payload) / sizeof(osr::location)) {
+      return prepared;
+    }
+
+    auto entry = preparation{destinations, direction, radius, prepared, 0U};
+    entry.bytes_ =
+        payload + entry.destinations_.capacity() * sizeof(osr::location);
     if (entry.bytes_ <= max_bytes_) {
       auto const lock = std::scoped_lock{mutex_};
       // Concurrent cold requests may prepare independently. Only one result

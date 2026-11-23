@@ -1017,7 +1017,10 @@ TEST(one_to_many, street_car_prepared_matches) {
   for (auto const& query :
        {first, make_query(from, many, 25, false),
         make_query(from, many, 250, true),
-        make_query(from, "49.872855;8.632008;0,0;0", 250, false),
+        make_query(from,
+                   "49.872855;8.632008;0,0;0,"
+                   "49.872855;8.632008,49.872504;8.628988",
+                   250, false),
         make_query(from, "0;0,49.872855;8.632008", 250, false)}) {
     equal(stock(query), candidate(query));
   }
@@ -1036,4 +1039,27 @@ TEST(one_to_many, street_car_prepared_matches) {
   }
   EXPECT_EQ(d.metrics_->car_snap_cache_hits_.Value() - hits_before, 4.0);
   EXPECT_EQ(d.metrics_->car_snap_cache_misses_.Value() - misses_before, 5.0);
+}
+
+TEST(one_to_many, street_car_match_lifetime_after_eviction) {
+  auto [d, _config] =
+      get_test_case<test_case::FFM_one_to_many_no_osr_footpath>();
+  auto cache = car_destination_match_cache{*d.l_, 1024U * 1024U, *d.metrics_};
+  auto const many = std::vector{
+      *parse_location("49.872855;8.632008", ';'), *parse_location("0;0", ';')};
+  auto const direction = osr::direction::kForward;
+  auto const held = cache.get(many, direction, 250.0);
+  auto const view = (*held)[osr::match_idx_t{0U}];
+  ASSERT_FALSE(view.empty());
+  auto const way = view.way_.front();
+
+  // Another request can evict this entry while the first still reads it.
+  for (auto radius = 251.0; radius != 259.0; ++radius) {
+    cache.get(many, direction, radius);
+  }
+  auto const fresh = cache.get(many, direction, 250.0);
+  EXPECT_NE(held, fresh);
+  EXPECT_EQ(view.way_.front(), way);
+  EXPECT_TRUE((*held)[osr::match_idx_t{1U}].empty());
+  EXPECT_EQ((*fresh)[osr::match_idx_t{0U}].way_.front(), way);
 }

@@ -84,18 +84,23 @@ api::oneToMany_response one_to_many_direct(
         })
         .value_or(api::Duration{});
   };
-  if (profile == osr::search_profile::kCar && car_destination_matches) {
-    if (auto const prepared =
-            car_destination_matches->get(many, dir, max_matching_distance);
-        prepared) {
-      auto root = osr::match_result{};
-      l.match<osr::car>(std::get<osr::car::parameters>(pp), one, false, dir,
-                        max_matching_distance, nullptr, root);
-      auto const state = osr::route_one_to_many(
-          pp, w, l, profile, one, many, root[osr::match_idx_t{0U}], *prepared,
-          max_duration, dir, nullptr, nullptr, elevations_, reconstruct);
-      return utl::to_vec(state->results(), duration);
+  if (profile == osr::search_profile::kCar && car_destination_matches &&
+      max_duration >= std::chrono::seconds{0} &&
+      max_duration < osr::kMaxDuration &&
+      car_destination_matches->can_prepare(many, max_matching_distance)) {
+    auto root = osr::match_result{};
+    l.match<osr::car>(std::get<osr::car::parameters>(pp), one, false, dir,
+                      max_matching_distance, nullptr, root);
+    auto const from_match = root[osr::match_idx_t{0U}];
+    if (from_match.empty()) {
+      return api::oneToMany_response(many.size());
     }
+    auto const prepared =
+        car_destination_matches->get(many, dir, max_matching_distance);
+    auto const state = osr::route_one_to_many(
+        pp, w, l, profile, one, many, from_match, *prepared, max_duration, dir,
+        nullptr, nullptr, elevations_, reconstruct);
+    return utl::to_vec(state->results(), duration);
   }
   return utl::to_vec(osr::route(pp, w, l, profile, one, many, max_duration, dir,
                                 max_matching_distance, nullptr, nullptr,

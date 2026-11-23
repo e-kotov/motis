@@ -48,7 +48,7 @@ metrics_registry::metrics_registry(
               .Add({})},
       car_snap_cache_bytes_{prometheus::BuildGauge()
                                 .Name("motis_car_snap_cache_bytes")
-                                .Help("Bytes of active prepared CAR destination lists")
+                                .Help("Retained bytes of prepared CAR destination lists")
                                 .Register(registry_)
                                 .Add({})},
       routing_journeys_found_{prometheus::BuildCounter()
