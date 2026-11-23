@@ -8,11 +8,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <bit>
 #include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -395,6 +397,251 @@ int cmd_stops(args const& a) {
   return 0;
 }
 
+// --------------------------------------- numeric timetable export, binary
+// `export-tt --format bin`: the same tables as the CSV export in one file,
+// `timetable.vrtt`, for zero-copy loading (mmap). Little-endian throughout.
+//
+//   header (64 bytes)
+//     char[8]  magic "VRTTEXP1"
+//     u32      version (1)
+//     u32      n_sections
+//     i64      from_unix_minutes, to_unix_minutes
+//     i64      internal_interval_days_from, internal_interval_days_to (days since epoch)
+//     u64      data_offset (first byte after the section directory)
+//     u64      checksum: FNV-1a 64 over bytes [data_offset, end of file)
+//   section directory: n_sections x 40 bytes, in file order
+//     char[16] name (NUL padded), u32 elem_size, u32 reserved (0),
+//     u64 offset (absolute, 8-byte aligned), u64 count (elements)
+//   data: each section is a plain array of `count` fixed-width elements at
+//   `offset`; gaps between sections are zero padding (covered by the checksum).
+//   The section names and element types are listed in the README.
+namespace vrtt {
+
+struct header {
+  char magic_[8]{'V', 'R', 'T', 'T', 'E', 'X', 'P', '1'};
+  std::uint32_t version_{1U};
+  std::uint32_t n_sections_{};
+  std::int64_t from_{}, to_{};
+  std::int64_t days_from_{}, days_to_{};
+  std::uint64_t data_offset_{};
+  std::uint64_t checksum_{};
+};
+static_assert(sizeof(header) == 64);
+
+struct section_entry {
+  char name_[16]{};
+  std::uint32_t elem_size_{};
+  std::uint32_t reserved_{};
+  std::uint64_t offset_{};
+  std::uint64_t count_{};
+};
+static_assert(sizeof(section_entry) == 40);
+
+struct section {
+  std::string name_;
+  std::uint32_t elem_size_;
+  std::vector<std::uint8_t> bytes_;
+};
+
+template <typename T>
+section make_section(std::string name, std::vector<T> const& v) {
+  static_assert(std::is_trivially_copyable_v<T>);
+  auto s = section{std::move(name), static_cast<std::uint32_t>(sizeof(T)), {}};
+  s.bytes_.resize(v.size() * sizeof(T));
+  if (!v.empty()) {
+    std::memcpy(s.bytes_.data(), v.data(), s.bytes_.size());
+  }
+  return s;
+}
+
+constexpr std::uint64_t kFnvOffset = 0xcbf29ce484222325ULL;
+constexpr std::uint64_t kFnvPrime = 0x100000001b3ULL;
+
+std::uint64_t fnv1a(std::uint64_t h, std::uint8_t const* p, std::size_t const n) {
+  for (auto i = std::size_t{0U}; i != n; ++i) {
+    h ^= p[i];
+    h *= kFnvPrime;
+  }
+  return h;
+}
+
+}  // namespace vrtt
+
+std::uint64_t export_tt_bin(n::timetable const& tt, std::int64_t const from,
+                            std::int64_t const to, fs::path const& file,
+                            std::map<std::string, std::uint64_t>& counts) {
+  static_assert(std::endian::native == std::endian::little);
+  // locations
+  auto loc_parent = std::vector<std::int32_t>{};
+  auto loc_type = std::vector<std::uint8_t>{};
+  auto loc_transfer_time = std::vector<std::uint16_t>{};
+  auto loc_base = std::vector<std::uint32_t>{};
+  auto loc_traffic = std::vector<std::uint8_t>{};
+  auto loc_src = std::vector<std::uint32_t>{};
+  auto loc_lat = std::vector<double>{};
+  auto loc_lon = std::vector<double>{};
+  auto id_offsets = std::vector<std::uint64_t>{0U};
+  auto id_bytes = std::vector<char>{};
+  for (auto i = 0U; i != tt.n_locations(); ++i) {
+    auto const x = n::location_idx_t{i};
+    auto const parent = tt.locations_.parents_[x];
+    loc_parent.push_back(parent == n::location_idx_t::invalid()
+                             ? -1
+                             : static_cast<std::int32_t>(to_idx(parent)));
+    loc_type.push_back(static_cast<std::uint8_t>(tt.locations_.types_[x]));
+    loc_transfer_time.push_back(
+        static_cast<std::uint16_t>(tt.locations_.transfer_time_[x].count()));
+    loc_base.push_back(static_cast<std::uint32_t>(to_idx(tt.locations_.get_base_idx(x))));
+    loc_traffic.push_back(n::any_route_at(tt, x) ? 1U : 0U);
+    loc_src.push_back(static_cast<std::uint32_t>(to_idx(tt.locations_.src_[x])));
+    loc_lat.push_back(tt.locations_.coordinates_[x].lat_);
+    loc_lon.push_back(tt.locations_.coordinates_[x].lng_);
+    auto const id = std::string_view{tt.locations_.ids_[x].view()};
+    id_bytes.insert(end(id_bytes), begin(id), end(id));
+    id_offsets.push_back(id_bytes.size());
+  }
+  // footpaths (CSR by source location, profile 0)
+  auto fp_begin = std::vector<std::uint32_t>{0U};
+  auto fp_to = std::vector<std::uint32_t>{};
+  auto fp_minutes = std::vector<std::uint16_t>{};
+  for (auto i = 0U; i != tt.n_locations(); ++i) {
+    for (auto const& f : tt.locations_.footpaths_out_[0][n::location_idx_t{i}]) {
+      fp_to.push_back(static_cast<std::uint32_t>(to_idx(f.target())));
+      fp_minutes.push_back(static_cast<std::uint16_t>(f.duration().count()));
+    }
+    fp_begin.push_back(static_cast<std::uint32_t>(fp_to.size()));
+  }
+  // route stop sequences (CSR by route); flags bit0 in_allowed, bit1 out_allowed
+  auto rs_begin = std::vector<std::uint32_t>{0U};
+  auto rs_loc = std::vector<std::uint32_t>{};
+  auto rs_flags = std::vector<std::uint8_t>{};
+  for (auto r = 0U; r != tt.n_routes(); ++r) {
+    auto const seq = tt.route_location_seq_[n::route_idx_t{r}];
+    for (auto i = 0U; i != seq.size(); ++i) {
+      auto const st = n::stop{seq[i]};
+      rs_loc.push_back(static_cast<std::uint32_t>(to_idx(st.location_idx())));
+      rs_flags.push_back(static_cast<std::uint8_t>((st.in_allowed() ? 1U : 0U) |
+                                                   (st.out_allowed() ? 2U : 0U)));
+    }
+    rs_begin.push_back(static_cast<std::uint32_t>(rs_loc.size()));
+  }
+  // trip instances overlapping [from, to] and their events (CSR by trip, in
+  // route stop order; -1 = no arrival at seq 0 / no departure at the last seq)
+  auto trip_route = std::vector<std::uint32_t>{};
+  auto trip_transport = std::vector<std::uint32_t>{};
+  auto trip_day = std::vector<std::uint32_t>{};
+  auto trip_first_dep = std::vector<std::int64_t>{};
+  auto trip_last_arr = std::vector<std::int64_t>{};
+  auto ev_begin = std::vector<std::uint64_t>{0U};
+  auto ev_arr = std::vector<std::int64_t>{};
+  auto ev_dep = std::vector<std::int64_t>{};
+  auto const n_days = static_cast<std::uint32_t>(
+      (tt.internal_interval_days().to_ - tt.internal_interval_days().from_).count());
+  auto const minutes = [](n::unixtime_t const t) {
+    return static_cast<std::int64_t>(t.time_since_epoch().count());
+  };
+  for (auto r = 0U; r != tt.n_routes(); ++r) {
+    auto const ri = n::route_idx_t{r};
+    auto const n_stops = static_cast<n::stop_idx_t>(tt.route_location_seq_[ri].size());
+    for (auto const t : tt.route_transport_ranges_[ri]) {
+      for (auto d = 0U; d != n_days; ++d) {
+        auto const day = n::day_idx_t{d};
+        if (!tt.is_transport_active(t, day)) {
+          continue;
+        }
+        auto const tr = n::transport{t, day};
+        auto const first = minutes(tt.event_time(tr, 0U, n::event_type::kDep));
+        auto const last = minutes(tt.event_time(
+            tr, static_cast<n::stop_idx_t>(n_stops - 1U), n::event_type::kArr));
+        if (last < from || first > to) {
+          continue;
+        }
+        trip_route.push_back(r);
+        trip_transport.push_back(static_cast<std::uint32_t>(to_idx(t)));
+        trip_day.push_back(d);
+        trip_first_dep.push_back(first);
+        trip_last_arr.push_back(last);
+        for (auto i = n::stop_idx_t{0U}; i != n_stops; ++i) {
+          ev_arr.push_back(i == 0U ? std::int64_t{-1}
+                                   : minutes(tt.event_time(tr, i, n::event_type::kArr)));
+          ev_dep.push_back(i == n_stops - 1U
+                               ? std::int64_t{-1}
+                               : minutes(tt.event_time(tr, i, n::event_type::kDep)));
+        }
+        ev_begin.push_back(ev_arr.size());
+      }
+    }
+  }
+  auto sections = std::vector<vrtt::section>{};
+  sections.push_back(vrtt::make_section("loc_parent", loc_parent));
+  sections.push_back(vrtt::make_section("loc_type", loc_type));
+  sections.push_back(vrtt::make_section("loc_transfer", loc_transfer_time));
+  sections.push_back(vrtt::make_section("loc_base", loc_base));
+  sections.push_back(vrtt::make_section("loc_traffic", loc_traffic));
+  sections.push_back(vrtt::make_section("loc_src", loc_src));
+  sections.push_back(vrtt::make_section("loc_lat", loc_lat));
+  sections.push_back(vrtt::make_section("loc_lon", loc_lon));
+  sections.push_back(vrtt::make_section("loc_id_offsets", id_offsets));
+  sections.push_back(vrtt::make_section("loc_id_bytes", id_bytes));
+  sections.push_back(vrtt::make_section("fp_begin", fp_begin));
+  sections.push_back(vrtt::make_section("fp_to", fp_to));
+  sections.push_back(vrtt::make_section("fp_minutes", fp_minutes));
+  sections.push_back(vrtt::make_section("rs_begin", rs_begin));
+  sections.push_back(vrtt::make_section("rs_loc", rs_loc));
+  sections.push_back(vrtt::make_section("rs_flags", rs_flags));
+  sections.push_back(vrtt::make_section("trip_route", trip_route));
+  sections.push_back(vrtt::make_section("trip_transport", trip_transport));
+  sections.push_back(vrtt::make_section("trip_day", trip_day));
+  sections.push_back(vrtt::make_section("trip_first_dep", trip_first_dep));
+  sections.push_back(vrtt::make_section("trip_last_arr", trip_last_arr));
+  sections.push_back(vrtt::make_section("ev_begin", ev_begin));
+  sections.push_back(vrtt::make_section("ev_arr", ev_arr));
+  sections.push_back(vrtt::make_section("ev_dep", ev_dep));
+
+  auto const align8 = [](std::uint64_t const x) { return (x + 7U) & ~std::uint64_t{7U}; };
+  auto h = vrtt::header{};
+  h.n_sections_ = static_cast<std::uint32_t>(sections.size());
+  h.from_ = from;
+  h.to_ = to;
+  h.days_from_ = tt.internal_interval_days().from_.time_since_epoch().count();
+  h.days_to_ = tt.internal_interval_days().to_.time_since_epoch().count();
+  h.data_offset_ = sizeof(vrtt::header) + sections.size() * sizeof(vrtt::section_entry);
+  auto dir = std::vector<vrtt::section_entry>{};
+  auto offset = align8(h.data_offset_);
+  for (auto const& sec : sections) {
+    auto e = vrtt::section_entry{};
+    if (sec.name_.size() >= sizeof(e.name_)) {
+      throw std::runtime_error("section name too long");
+    }
+    std::memcpy(e.name_, sec.name_.data(), sec.name_.size());
+    e.elem_size_ = sec.elem_size_;
+    e.offset_ = offset;
+    e.count_ = sec.bytes_.size() / sec.elem_size_;
+    dir.push_back(e);
+    counts[sec.name_] = e.count_;
+    offset = align8(offset + sec.bytes_.size());
+  }
+  // data region: [data_offset, end); padding bytes are zero and part of the checksum
+  auto data = std::vector<std::uint8_t>(offset - h.data_offset_, 0U);
+  for (auto i = 0U; i != sections.size(); ++i) {
+    if (!sections[i].bytes_.empty()) {
+      std::memcpy(data.data() + (dir[i].offset_ - h.data_offset_), sections[i].bytes_.data(),
+                  sections[i].bytes_.size());
+    }
+  }
+  h.checksum_ = vrtt::fnv1a(vrtt::kFnvOffset, data.data(), data.size());
+  auto out = std::ofstream{file, std::ios::binary};
+  out.write(reinterpret_cast<char const*>(&h), sizeof(h));
+  out.write(reinterpret_cast<char const*>(dir.data()),
+            static_cast<std::streamsize>(dir.size() * sizeof(vrtt::section_entry)));
+  out.write(reinterpret_cast<char const*>(data.data()), static_cast<std::streamsize>(data.size()));
+  out.close();
+  if (!out) {
+    throw std::runtime_error(fmt::format("write failed: {}", file.string()));
+  }
+  return h.checksum_;
+}
+
 // ------------------------------------------------ numeric timetable export
 // Exports exactly what the pinned Nigiri RAPTOR scans (profile 0, scheduled
 // timetable): locations with base/parent mapping and transfer times, the
@@ -408,7 +655,11 @@ int cmd_export_tt(args const& a) {
   auto const from = a.integer("from-unix-minutes");
   auto const to = a.integer("to-unix-minutes");
   auto const dir = fs::path{a.str("out")};
+  auto const format = a.str("format", "csv");
   a.check_all_used();
+  if (format != "csv" && format != "bin") {
+    throw std::runtime_error("--format must be csv|bin");
+  }
   if (to < from) {
     throw std::runtime_error("to < from");
   }
@@ -416,6 +667,25 @@ int cmd_export_tt(args const& a) {
     throw std::runtime_error(fmt::format("refusing to overwrite {}", dir.string()));
   }
   fs::create_directories(dir);
+  if (format == "bin") {
+    auto const t = clock_t_::now();
+    auto counts = std::map<std::string, std::uint64_t>{};
+    auto const checksum = export_tt_bin(tt, from, to, dir / "timetable.vrtt", counts);
+    auto meta = std::ofstream{dir / "export.json"};
+    meta << fmt::format(
+        "{{\"tool\":\"motis-accessibility export-tt\",\"schema\":1,\"format\":\"bin\","
+        "\"file\":\"timetable.vrtt\",\"magic\":\"VRTTEXP1\",\"version\":1,"
+        "\"checksum_fnv1a64\":\"{:016x}\",\"from_unix_minutes\":{},\"to_unix_minutes\":{},"
+        "\"n_locations\":{},\"n_routes\":{},\"n_route_stops\":{},\"n_footpaths\":{},"
+        "\"n_trips\":{},\"n_events\":{},\"profile\":0,\"internal_interval_days\":[{},{}]}}\n",
+        checksum, from, to, tt.n_locations(), tt.n_routes(), counts["rs_loc"], counts["fp_to"],
+        counts["trip_route"], counts["ev_arr"],
+        tt.internal_interval_days().from_.time_since_epoch().count(),
+        tt.internal_interval_days().to_.time_since_epoch().count());
+    fmt::println(stderr, "export-tt (bin): trips={} events={} footpaths={} load_ms={:.1f} write_ms={:.1f}",
+                 counts["trip_route"], counts["ev_arr"], counts["fp_to"], l.load_ms_, ms_since(t));
+    return 0;
+  }
   {
     auto out = std::ofstream{dir / "locations.csv"};
     out << "loc,id,src,lat,lon,parent,type,transfer_time,base,traffic\n";
@@ -783,6 +1053,72 @@ n::routing::raptor_state const& one_to_all_reuse(TT const& tt,
   return c.state_;
 }
 
+// ------------------------------------------ Range-RAPTOR over a window
+// --range: per origin, one raptor runs the departures of the window latest
+// first, as Nigiri's range search does: between departures only
+// next_start_time() resets (best / tmp / marks); round times and the one-to-all
+// round arrivals are kept, so a departure's labels start from what later
+// departures reached (they stay valid: one can wait). The kept arrival rows hold
+// the best over this and all later departures; each departure gets a finished
+// copy (strict improvement over earlier rounds, its own cap) in `out`, with
+// exactly the layout one_to_all returns, so the readers below are unchanged.
+// Requires one Nigiri day base for the whole window (checked by the caller).
+using range_raptor_t = n::routing::raptor<n::direction::kForward, false, n::via_offset_t{0U},
+                                          n::routing::search_mode::kOneToAll>;
+
+void make_range_raptor(n::timetable const& tt, n::routing::query const& q,
+                       n::day_idx_t const base, reuse_ctx& c, std::optional<range_raptor_t>& ra) {
+  if (c.is_dest_.size() != tt.n_locations()) {
+    c.is_dest_ = n::bitvec{tt.n_locations()};
+    c.lb_.assign(tt.n_locations(), 0U);
+  }
+  ra.emplace(tt, nullptr, c.state_, c.is_dest_, c.is_via_, c.dist_to_dest_, q.td_dest_, c.lb_,
+             q.via_stops_, base, q.allowed_claszes_, q.require_bike_transport_,
+             q.require_car_transport_, q.prf_idx_ == n::kWheelchairProfile,
+             q.no_compulsory_reservation_, q.transfer_time_settings_, q.prf_idx_);
+}
+
+void range_step(n::timetable const& tt, n::routing::query const& q, range_raptor_t& ra,
+                reuse_ctx const& c, n::routing::raptor_state& out) {
+  namespace r = n::routing;
+  constexpr auto kInvalid = n::kInvalidDelta<n::direction::kForward>;
+  auto const start_time = std::get<n::unixtime_t>(q.start_time_);
+  auto results = n::pareto_set<r::journey>{};
+  ra.next_start_time();
+  for (auto const& s : q.start_) {
+    auto const t = start_time + s.duration();
+    r::for_each_meta(tt, r::rt_virts(nullptr, q.prf_idx_), q.start_match_mode_, s.target(),
+                     [&](n::location_idx_t const l) { ra.add_start(l, t); });
+  }
+  auto const worst_time_at_dest = start_time + q.max_travel_time_;
+  auto worst = std::array<n::unixtime_t, r::kMaxTransfers + 2U>{};
+  worst.fill(worst_time_at_dest);
+  ra.execute(start_time, q.max_transfers_, worst, results);
+
+  // finished copy for this departure (finish_one_to_all on rows 0..max_transfers+1)
+  auto const worst_at_dest = ra.to_delta(worst_time_at_dest);
+  auto const n_rows = static_cast<std::size_t>(q.max_transfers_) + 2U;
+  auto const n_loc = static_cast<std::size_t>(tt.n_locations());
+  auto const& acc = c.state_.one_to_all_arrivals_;
+  auto& fin = out.one_to_all_arrivals_;
+  if (fin.n_rows_ != r::kMaxTransfers + 2U || fin.n_columns_ != n_loc) {
+    fin.resize(r::kMaxTransfers + 2U, n_loc);
+    std::fill(begin(fin.entries_), end(fin.entries_), kInvalid);
+  }
+  std::copy_n(begin(acc.entries_), n_rows * n_loc, begin(fin.entries_));
+  for (auto l = std::size_t{0U}; l != n_loc; ++l) {
+    auto b = kInvalid;
+    for (auto k = std::size_t{0U}; k != n_rows; ++k) {
+      auto& t = fin[k][l];
+      if (t < b && !(worst_at_dest < t)) {
+        b = t;
+      } else {
+        t = kInvalid;
+      }
+    }
+  }
+}
+
 // ---------------------------------------------------------------- route
 struct stream_header {
   char magic_[8]{'V', 'R', 'T', 'T', 'M', 'A', 'T', 'X'};
@@ -842,6 +1178,13 @@ int cmd_route(args const& a) {
       throw std::runtime_error("departures outside the loaded timetable interval");
     }
   }
+  auto const day_base = [&](std::int64_t const m) {
+    auto const t = n::unixtime_t{n::i32_minutes{static_cast<std::int32_t>(m)}};
+    return n::day_idx_t{std::chrono::duration_cast<date::days>(
+                            std::chrono::round<std::chrono::days>(t) - tt.internal_interval().from_)
+                            .count()};
+  };
+  auto const window_base = day_base(dep_start);
   auto const max_travel_arg = a.integer("max-travel-minutes");
   if (max_travel_arg < 0 || max_travel_arg > static_cast<std::int64_t>(kMaxCap)) {
     throw std::runtime_error("max-travel-minutes must be in [0, 1440]");
@@ -860,6 +1203,12 @@ int cmd_route(args const& a) {
   auto const max_transfers = static_cast<std::uint8_t>(max_transfers_arg);
   auto const with_transfers = a.has("with-transfers");
   auto const reuse_state = a.has("reuse-state");  // experimental, see one_to_all_reuse
+  auto const range = a.has("range");  // Range-RAPTOR over the departure window
+  if (range && day_base(dep_start + (dep_count - 1) * dep_step) != window_base) {
+    throw std::runtime_error(
+        "--range: the departure window spans two Nigiri day bases (round to the nearest "
+        "UTC day changes inside the window); split the window at 12:00 UTC");
+  }
   // transit (default, = stock one-to-many): egress only from rounds k >= 1.
   // all: also from round 0, i.e. walk origin->stop->destination without a vehicle.
   auto const egress_rounds = a.str("egress-rounds", "transit");
@@ -946,6 +1295,7 @@ int cmd_route(args const& a) {
   auto worker_t = [&](auto const type_tag) {
     using tt_t = std::decay_t<decltype(type_tag)>;
     auto rctx = reuse_ctx{};
+    auto range_out = n::routing::raptor_state{};
     constexpr auto kUnreachableT = std::numeric_limits<tt_t>::max();
     auto const block = static_cast<std::size_t>(dep_count) * n_dests;
     auto tt_buf = std::vector<tt_t>(block);
@@ -961,7 +1311,10 @@ int cmd_route(args const& a) {
         starts.emplace_back(n::location_idx_t{access.value_[j]},
                             n::duration_t{static_cast<n::duration_t::rep>(access.minutes_[j])}, 0U);
       }
-      for (auto di = 0U; di != dep_count; ++di) {
+      // --range: departures latest first through one raptor per origin
+      auto ra = std::optional<range_raptor_t>{};
+      for (auto ii = 0U; ii != dep_count; ++ii) {
+        auto const di = range ? dep_count - 1U - ii : ii;
         auto* row_tt = tt_buf.data() + static_cast<std::size_t>(di) * n_dests;
         auto* row_tr = with_transfers
                            ? tr_buf.data() + static_cast<std::size_t>(di) * n_dests
@@ -996,10 +1349,17 @@ int cmd_route(args const& a) {
             .allowed_claszes_ = clasz_mask,
         };
         auto const tk = clock_t_::now();
-        auto const fresh = reuse_state
+        auto const fresh = (reuse_state || range)
                                ? n::routing::raptor_state{}
                                : n::routing::one_to_all<n::direction::kForward>(tt, nullptr, q);
-        auto const& state = reuse_state ? one_to_all_reuse(tt, q, rctx) : fresh;
+        if (range) {
+          if (!ra.has_value()) {
+            make_range_raptor(tt, q, window_base, rctx, ra);
+          }
+          range_step(tt, q, *ra, rctx, range_out);
+        }
+        auto const& state =
+            range ? range_out : (reuse_state ? one_to_all_reuse(tt, q, rctx) : fresh);
         auto const tr = clock_t_::now();
         kernel_ns += static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(tr - tk).count());
@@ -1133,14 +1493,14 @@ int cmd_route(args const& a) {
       "\"route_wall_ms\":{:.3f},\"kernel_thread_ms\":{:.3f},"
       "\"reduce_thread_ms\":{:.3f},\"write_thread_ms\":{:.3f},"
       "\"peak_rss_kb\":{},\"n_locations\":{},\"reuse_state\":{},\"nigiri_reusable_one_to_all\":{},"
-      "\"pin_threads\":{},\"allowed_cpus\":\"{}\","
+      "\"pin_threads\":{},\"allowed_cpus\":\"{}\",\"range\":{},"
       "\"reuse_init_thread_ms\":{:.3f},\"reuse_scan_thread_ms\":{:.3f},\"reuse_finish_thread_ms\":{:.3f}}}",
       kFormatVersion, target_stops ? "stops" : "dests", egress_rounds, origin_from, origin_to,
       n_dests, dep_count, n_threads, discard, max_travel,
       static_cast<int>(max_transfers), n_queries.load(), l.load_ms_, conn_ms,
       route_ms, kernel_ns.load() / 1e6, reduce_ns.load() / 1e6,
       write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations(), reuse_state,
-      kHasReusableOneToAll<n::timetable>, pin_threads, fmt::join(cpus, " "),
+      kHasReusableOneToAll<n::timetable>, pin_threads, fmt::join(cpus, " "), range,
       reuse_init_ns.load() / 1e6, reuse_scan_ns.load() / 1e6, reuse_finish_ns.load() / 1e6);
   if (!timing_path.empty()) {
     auto tj = std::ofstream{timing_path};
