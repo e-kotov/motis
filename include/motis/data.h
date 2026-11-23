@@ -66,6 +66,10 @@ struct rt {
   ptr<elevators> e_;
 };
 
+namespace ep {
+struct one_to_many_offsets_cache;
+}  // namespace ep
+
 struct data {
   data(std::filesystem::path);
   data(std::filesystem::path, config const&);
@@ -103,7 +107,7 @@ struct data {
                     elevator_nodes_, elevator_osm_mapping_, shapes_,
                     railviz_static_, matches_, way_matches_, rt_, gbfs_,
                     odm_bounds_, ride_sharing_bounds_, flex_areas_, metrics_,
-                    auser_
+                    auser_, one_to_many_offsets_cache_
 #if defined(NIGIRI_CUDA)
                     ,
                     gpu_tt_, gpu_pool_
@@ -144,6 +148,7 @@ struct data {
   ptr<flex::flex_areas> flex_areas_;
   ptr<metrics_registry> metrics_;
   ptr<std::map<std::string, auser>> auser_;
+  ptr<ep::one_to_many_offsets_cache> one_to_many_offsets_cache_;
 #if defined(NIGIRI_CUDA)
   ptr<nigiri::routing::gpu::gpu_timetable> gpu_tt_;
   ptr<gpu_search_pool> gpu_pool_;

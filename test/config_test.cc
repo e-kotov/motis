@@ -113,6 +113,7 @@ limits:
   geocode_max_suggestions: 512
   reverse_geocode_max_results: 512
   max_max_matching_distance: 250.000000
+  onetomany_offsets_cache_max_entries: 131072
 osr_footpath: true
 geocoding: true
 reverse_geocoding: false

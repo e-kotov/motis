@@ -272,6 +272,7 @@ struct config {
     unsigned geocode_max_suggestions_{512U};
     unsigned reverse_geocode_max_results_{512U};
     double max_max_matching_distance_{250.0};
+    unsigned onetomany_offsets_cache_max_entries_{131072U};
   };
   limits get_limits() const { return limits_.value_or(limits{}); }
   std::optional<limits> limits_{};

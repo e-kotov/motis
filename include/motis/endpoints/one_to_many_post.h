@@ -13,6 +13,8 @@
 
 namespace motis::ep {
 
+struct one_to_many_offsets_cache;
+
 struct one_to_many_post {
   api::oneToManyPost_response operator()(
       motis::api::OneToManyParams const&) const;
@@ -42,6 +44,7 @@ struct one_to_many_intermodal_post {
   way_matches_storage const* way_matches_;
   std::shared_ptr<gbfs::gbfs_data> const& gbfs_;
   metrics_registry* metrics_;
+  one_to_many_offsets_cache* offsets_cache_;
 };
 
 }  // namespace motis::ep

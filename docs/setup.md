@@ -130,6 +130,7 @@ limits:
   geocode_max_suggestions: 512    # maximum requestable results for /geocode
   reverse_geocode_max_results: 512 # maximum requestable results for /reverse-geocode
   max_max_matching_distance: 250  # upper bound (meters) for the maxMatchingDistance API param, larger values are capped to this limit
+  onetomany_offsets_cache_max_entries: 131072 # many-side street offsets of one-to-many-intermodal requests kept for reuse across requests (WALK/BIKE/CAR, coordinates only; 0 disables)
 logging:
   log_level: debug                # log-level (default = debug; Supported log-levels: error, info, debug)
 osr_footpath: true                # compute footpaths by street routing (for `useRoutedTransfers`; without it, they replace the beeline walks), `transfers.txt` stays authoritative

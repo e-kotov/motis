@@ -16,6 +16,7 @@
 
 #include "motis/config.h"
 #include "motis/endpoints/one_to_many.h"
+#include "motis/endpoints/one_to_many_offsets_cache.h"
 #include "motis/endpoints/one_to_many_post.h"
 #include "motis/endpoints/routing.h"
 
@@ -975,4 +976,77 @@ TEST(one_to_many, street_routing) {
       EXPECT_NEAR(post_distance, plan_distance + 1.5, 1.5);
     }
   }
+}
+
+// Requests that share their many places reuse the cached many-side offsets.
+// Each response equals the one computed without the cache, also when requests
+// with different street parameters for the many side are interleaved, and
+// requests the cache must not serve (wheelchair) bypass it.
+TEST(one_to_many, offsets_cache_matches_uncached) {
+  auto [d, _config] = get_test_case<test_case::FFM_one_to_many>();
+  ASSERT_NE(nullptr, d.one_to_many_offsets_cache_);
+
+  auto const cached = one_to_many_get(d);
+  auto uncached = one_to_many_get(d);
+  uncached.offsets_cache_ = nullptr;
+
+  auto const many = std::string{
+      "&many="
+      "49.87336;8.62926,"  // DA_10
+      "50.10593;8.66118,"  // FFM_10
+      "50.107577;8.6638173,"  // de:6412:10:6:1
+      "50.10739;8.66333,"  // FFM_101
+      "50.11385;8.67912,"  // FFM_HAUPT_U
+      "50.11385;8.67912;-4,"  // FFM_HAUPT_U, platform level
+      "50.11404;8.67824,"  // FFM_HAUPT_S
+      "49.872504;8.628988,"  // Inside DA station
+      "50.106596;8.663485,"  // Inside FFM station
+      "50.113494;8.679129,"  // Near FFM_HAUPT_U
+      "50.114520;8.673050"};  // Too far from FFM_HAUPT_U
+  auto const queries = std::vector<std::string>{
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=420",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=240",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=20&maxPostTransitTime=420",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=420"
+          "&postTransitModes=BIKE",
+      "?one=49.8722439;8.6320624" + many +
+          "&time=2019-04-30T22:40:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=420&maxTransfers=0",
+      "?one=50.11385;8.67912;-4" + many +
+          "&time=2019-04-30T23:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPreTransitTime=420&arriveBy=true",
+      "?one=50.11385;8.67912;-4" + many +
+          "&time=2019-04-30T23:30:00.000Z&maxTravelTime=60"
+          "&maxMatchingDistance=250&maxPostTransitTime=240"
+          "&pedestrianProfile=WHEELCHAIR"};
+
+  auto n_reachable = 0U;
+  for (auto round = 0U; round != 2U; ++round) {
+    for (auto const& q : queries) {
+      auto const url = "/api/experimental/one-to-many-intermodal" + q;
+      auto const expected = uncached(url);
+      auto const actual = cached(url);
+      EXPECT_EQ(expected, actual) << url;
+      ASSERT_TRUE(expected.transit_durations_.has_value());
+      for (auto const& set : *expected.transit_durations_) {
+        n_reachable += set.empty() ? 0U : 1U;
+      }
+    }
+  }
+  EXPECT_LT(0U, n_reachable);
+  // Five many-side parameter sets: the request at 22:40 shares its set with
+  // the first one (time and transfer limit are not part of the key) and the
+  // wheelchair request is not cached. 11 places each. Hits: the 22:40 request
+  // in the first round and all six cacheable requests in the second.
+  EXPECT_EQ(5U * 11U, d.one_to_many_offsets_cache_->size());
+  EXPECT_EQ(5U * 11U, d.one_to_many_offsets_cache_->misses_.load());
+  EXPECT_EQ(7U * 11U, d.one_to_many_offsets_cache_->hits_.load());
 }
