@@ -68,8 +68,16 @@ arrival overlap [A, B], with absolute UTC event times in minutes.
   `route_stops.csv`, `trips.csv`, `events.csv` and `export.json`.
 - `--format bin` writes the same tables as one file, `timetable.vrtt`, plus
   `export.json` (with the checksum), for zero-copy loading. `vrtt.py` is a
-  standard-library reference reader: `vrtt.py check FILE` and
-  `vrtt.py to-csv FILE DIR`, which regenerates the CSV export byte for byte.
+  standard-library reference reader:
+  - `vrtt.py check FILE` exits 2 on any invalid file. It checks the magic, the
+    version, each required section exactly once, element sizes, alignment and
+    padding, the checksum, `from ≤ to`, and every array's consistency: lengths,
+    CSR indexes starting at 0, monotone and ending at their payload, references
+    in bounds, and per-trip event counts equal to the route length.
+  - `vrtt.py to-csv FILE DIR` regenerates the CSV export byte for byte.
+  - `vrtt_test.py FILE` checks that `check` rejects corrupted copies of a valid
+    file: a duplicate, unknown or missing section, a reversed interval, a
+    mismatched or non-monotone index array, or a flipped payload byte.
 
 `timetable.vrtt` layout (little-endian):
 
