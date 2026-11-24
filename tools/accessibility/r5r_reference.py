@@ -14,13 +14,21 @@ Standard library only.
 """
 import argparse
 import csv
+import ctypes
+import errno
 import math
+import os
 import re
 import struct
 import sys
 
 UNREACHED = 2**31 - 1
 TWO_HOURS = 7200
+
+# std::stod uses strtod, including its hexadecimal syntax and range errors.
+_strtod = ctypes.CDLL(None, use_errno=True).strtod
+_strtod.argtypes = (ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p))
+_strtod.restype = ctypes.c_double
 
 
 def read_stream(path):
@@ -80,6 +88,85 @@ def strictly_increasing(spec, lo, hi, name):
         if i and x <= v[i - 1]:
             raise ValueError(f"--{name} must be strictly increasing and unique, got {x} after {v[i - 1]}")
     return v
+
+
+def parse_csv_line(line):
+    """Parse one physical CSV line, with doubled quotes inside quoted fields."""
+    row = []
+    start = 0
+    while True:
+        if line[start:start + 1] == b'"':
+            parts = []
+            start += 1
+            while True:
+                quote = line.find(b'"', start)
+                if quote == -1:
+                    raise ValueError("unclosed quoted CSV field")
+                parts.append(line[start:quote])
+                start = quote + 1
+                if line[start:start + 1] != b'"':
+                    break
+                parts.append(b'"')
+                start += 1
+            row.append(b"".join(parts))
+            if start == len(line):
+                return row
+            if line[start:start + 1] != b",":
+                raise ValueError("expected comma after quoted CSV field")
+        else:
+            comma = line.find(b",", start)
+            field = line[start:] if comma == -1 else line[start:comma]
+            if b'"' in field:
+                raise ValueError("quote in unquoted CSV field")
+            row.append(field)
+            if comma == -1:
+                return row
+            start = comma
+        start += 1
+
+
+def opportunity_count(token):
+    start = ctypes.create_string_buffer(token)
+    end = ctypes.c_void_p()
+    ctypes.set_errno(0)
+    value = _strtod(start, ctypes.byref(end))
+    if ctypes.get_errno() == errno.ERANGE:
+        raise ValueError("stod")
+    if not token or end.value != ctypes.addressof(start) + len(token):
+        raise ValueError(f"bad number '{token.decode('utf-8', errors='backslashreplace')}'")
+    if not math.isfinite(value) or value < 0:
+        raise ValueError("opportunity counts must be finite and non-negative")
+    return value
+
+
+def read_opportunities(path, columns, n_dests):
+    table = []
+    try:
+        # Split on LF and strip one terminal CR, as for std::getline.
+        with open(path, "rb") as f:
+            for line in f:
+                line = line.removesuffix(b"\n").removesuffix(b"\r")
+                if line:
+                    table.append(parse_csv_line(line))
+    except OSError:
+        raise ValueError(f"cannot open {path}") from None
+    header = table[0] if table else []
+    rows = table[1:]
+    if len(rows) != n_dests:
+        raise ValueError(f"--opportunities: {len(rows)} rows, expected {n_dests} destinations")
+
+    for i, row in enumerate(rows, 1):
+        if len(row) != len(header):
+            raise ValueError(f"--opportunities: row {i}: expected {len(header)} columns, got {len(row)}")
+
+    opportunities = {}
+    for name in columns.split(","):
+        try:
+            col = header.index(os.fsencode(name))
+        except ValueError:
+            raise ValueError(f"column {name} missing") from None
+        opportunities[name] = [opportunity_count(row[col]) for row in rows]
+    return opportunities
 
 
 def percentile_index(n, p):
@@ -200,13 +287,7 @@ def main():
     idx = [percentile_index(n_dep, p) for p in pcts]
     opp = {}
     if a.opportunities is not None:
-        try:
-            with open(a.opportunities) as f:
-                rows = list(csv.DictReader(f))
-        except OSError:
-            raise ValueError(f"cannot open {a.opportunities}") from None
-        for c in a.opportunity_columns.split(","):
-            opp[c] = [float(r[c]) for r in rows]
+        opp = read_opportunities(a.opportunities, a.opportunity_columns, n_dests)
     decay = Decay(a.decay)
     zeros = [decay.zero(c * 60) for c in cutoffs]
 

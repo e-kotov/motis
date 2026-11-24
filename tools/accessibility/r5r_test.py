@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Regression tests for the r5r-style outputs, on a synthetic route stream.
 
-    r5r_test.py TMP_DIR [MOTIS_ACCESSIBILITY] [--route-data RULES_MIDNIGHT_DATA]
+    r5r_test.py TMP_DIR [--bin MOTIS_ACCESSIBILITY] [--route-data RULES_MIDNIGHT_DATA]
 
 Always (r5r_reference.py): the valid stream parses; a stream with its final
 byte (in the transfers block) removed, and one with a trailing partial origin
@@ -13,7 +13,7 @@ without --opportunities reports IDENTICAL, so a false IDENTICAL cannot pass.
 With the binary also `r5r-reduce`: on the valid stream its outputs equal the
 reference (IDENTICAL), it rejects the same invalid inputs (exit 2), and the same
 cutoff cases are rejected against its own travel-time-only output.
-Also exercises quoted CSV fields, duplicate origins, strict integer tokens,
+Also exercises valid and malformed opportunity CSVs, duplicate origins, strict integer tokens,
 zero departures and accessibility option dependencies. With a retained
 rules-midnight import, repeat the CSV cases through route using hand-written
 direct connectors.
@@ -113,13 +113,37 @@ def stage3_cases(tmp, binary, route_data, valid, opp, tt_hand, expect):
     quoted = work / "quoted.csv"
     quoted.write_text('label,pop\n"district,99",10\n"district,98",0\n', encoding="utf-8")
     escapes = work / "quoted-crlf.csv"
-    escapes.write_bytes(b'"label","pop"\r\n"district ""A"",99","10"\r\n"district ""B"",98",0\r\n')
-    unclosed = work / "unclosed.csv"
-    unclosed.write_text('label,pop\n"district,99,10\ndistrict,0\n', encoding="utf-8")
-    trailing = work / "trailing-number.csv"
-    trailing.write_text('label,pop\ndistrict,10oops\ndistrict,0\n', encoding="utf-8")
-    trailing_quote = work / "trailing-quote.csv"
-    trailing_quote.write_text('label,pop\ndistrict,"99"""\ndistrict,0\n', encoding="utf-8")
+    escapes.write_bytes(b'\r\n"label","pop"\r\n"district ""A"",99"," +0x1.4p3"\r\n'
+                        b'\n"district ""B"",98",0\r\n')
+
+    def csv_cases(cases):
+        for name, data, reason in cases:
+            path = work / f"{name}.csv"
+            path.write_bytes(data)
+            yield path, reason
+
+    malformed = list(csv_cases([
+        ("unclosed", b'label,pop\n"district,99,10\ndistrict,0\n', "unclosed quoted CSV field"),
+        ("unclosed-last", b'label,pop\n"district,99",10\n"district,98","0', "unclosed quoted CSV field"),
+        ("unescaped-quote", b'label,pop\ndistr"ict,10\ndistrict,0\n', "quote in unquoted CSV field"),
+        ("after-closing-quote", b'label,pop\n"district"x,10\ndistrict,0\n', "expected comma after quoted CSV field"),
+        ("trailing-number", b"label,pop\ndistrict,10oops\ndistrict,0\n", "bad number '10oops'"),
+        ("trailing-quote", b'label,pop\ndistrict,"99"""\ndistrict,0\n', "bad number '99\"'"),
+        ("trailing-space", b"label,pop\ndistrict,10 \ndistrict,0\n", "bad number '10 '"),
+        ("overflow", b"label,pop\ndistrict,10\ndistrict,1e999\n", "stod"),
+        ("underflow", b"label,pop\ndistrict,10\ndistrict,1e-999\n", "stod"),
+        ("malformed-header", b'la"bel,pop\ndistrict,10\ndistrict,0\n', "quote in unquoted CSV field"),
+        ("missing-column", b"label,other\ndistrict,10\ndistrict,0\n", "column pop missing"),
+        ("row-count", b"label,pop\ndistrict,10\n", "--opportunities: 1 rows, expected 2 destinations"),
+    ]))
+    # The reference additionally validates every row's width and count domain.
+    reference_errors = list(csv_cases([
+        ("short-row", b"label,pop\ndistrict,10\ndistrict\n", "--opportunities: row 2: expected 2 columns, got 1"),
+        ("long-row", b"label,pop\ndistrict,10\ndistrict,0,extra\n", "--opportunities: row 2: expected 2 columns, got 3"),
+        ("negative", b"label,pop\ndistrict,10\ndistrict,-1\n", "opportunity counts must be finite and non-negative"),
+        ("nan", b"label,pop\ndistrict,10\ndistrict,nan\n", "opportunity counts must be finite and non-negative"),
+        ("infinity", b"label,pop\ndistrict,10\ndistrict,inf\n", "opportunity counts must be finite and non-negative"),
+    ]))
 
     hand = work / "tt-quoted"
     write_ttm_only(hand, records={0: [5, 0xFFFF], 1: [0xFFFF, 5]}, n_dests=2, n_dep=1)
@@ -153,15 +177,17 @@ def stage3_cases(tmp, binary, route_data, valid, opp, tt_hand, expect):
                     totals = sorted((int(row["origin"]), float(row["accessibility"])) for row in csv.DictReader(f))
                 expect(f"{mode} {path.name} totals", totals == [(0, 10), (1, 0)], str(totals))
                 check_quoted(f"{mode} {path.name}", stream, path, out_dir)
-        for path, reason in ((unclosed, "unclosed quoted CSV field"),
-                             (trailing, "bad number '10oops'"),
-                             (trailing_quote, "bad number '99\"'")):
+        for path, reason in malformed:
             rc, out = run(base + ["--r5r-out", work / f"{mode}-bad-csv"] + options(path))
             expect(f"{mode} rejects {path.name}",
                    rc == 2 and out.rpartition("\n")[2] == f"error: {reason}", f"(rc={rc}: {out[-160:]})")
 
     check_quoted("hand-written quoted CSV output", quoted_stream, quoted, hand)
     check_quoted("hand-written quoted and escaped CRLF CSV output", quoted_stream, escapes, hand)
+    for path, reason in malformed + reference_errors:
+        rc, out = run([sys.executable, REF, "--stream", quoted_stream, "--r5r-dir", hand] + options(path))
+        expect(f"reference rejects {path.name}",
+               rc == 2 and out == f"invalid: {reason}", f"(rc={rc}: {out[-240:]})")
     if binary:
         check_compiled("r5r-reduce", [binary, "r5r-reduce", "--stream", quoted_stream], quoted_stream)
     if route_data:
@@ -186,12 +212,14 @@ def stage3_cases(tmp, binary, route_data, valid, opp, tt_hand, expect):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("tmp")
-    parser.add_argument("binary", nargs="?")
+    binaries = parser.add_mutually_exclusive_group()
+    binaries.add_argument("binary", nargs="?")
+    binaries.add_argument("--bin")
     parser.add_argument("--route-data", help="data directory of the imported rules-midnight fixture")
     cli = parser.parse_args()
-    if cli.route_data and not cli.binary:
+    tmp, binary = cli.tmp, cli.bin or cli.binary
+    if cli.route_data and not binary:
         parser.error("--route-data requires MOTIS_ACCESSIBILITY")
-    tmp, binary = cli.tmp, cli.binary
     os.makedirs(tmp, exist_ok=True)
     ok = True
 
