@@ -18,15 +18,18 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <mutex>
+#include <numbers>
 #include <optional>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 #include <pthread.h>
@@ -224,6 +227,43 @@ struct csv_table {
   }
 };
 
+std::vector<std::string> parse_csv_line(std::string_view line) {
+  auto row = std::vector<std::string>{};
+  while (true) {
+    auto& field = row.emplace_back();
+    if (line.starts_with('"')) {
+      line.remove_prefix(1U);
+      while (true) {
+        auto const quote = line.find('"');
+        if (quote == std::string_view::npos) {
+          throw std::runtime_error("unclosed quoted CSV field");
+        }
+        field.append(line.substr(0U, quote));
+        line.remove_prefix(quote + 1U);
+        if (!line.starts_with('"')) {
+          break;
+        }
+        field.push_back('"');
+        line.remove_prefix(1U);
+      }
+    } else {
+      auto const field_view = line.substr(0U, line.find(','));
+      if (field_view.find('"') != std::string_view::npos) {
+        throw std::runtime_error("quote in unquoted CSV field");
+      }
+      field = field_view;
+      line.remove_prefix(field_view.size());
+    }
+    if (line.empty()) {
+      return row;
+    }
+    if (!line.starts_with(',')) {
+      throw std::runtime_error("expected comma after quoted CSV field");
+    }
+    line.remove_prefix(1U);
+  }
+}
+
 csv_table read_csv(fs::path const& p) {
   auto in = std::ifstream{p};
   if (!in) {
@@ -239,8 +279,7 @@ csv_table read_csv(fs::path const& p) {
     if (line.empty()) {
       continue;
     }
-    auto parts = split(line, ',');
-    auto row = std::vector<std::string>(parts.begin(), parts.end());
+    auto row = parse_csv_line(line);
     if (first) {
       t.header_ = std::move(row);
       first = false;
@@ -249,6 +288,84 @@ csv_table read_csv(fs::path const& p) {
     }
   }
   return t;
+}
+
+struct opportunity_data {
+  std::vector<std::vector<double>> values_;
+  std::vector<std::string> names_;
+};
+
+double parse_opportunity_count(std::string const& token) {
+  auto const consume_sign = [](std::string_view& s) {
+    if (s.starts_with('+') || s.starts_with('-')) {
+      s.remove_prefix(1U);
+    }
+  };
+  auto const consume_digits = [](std::string_view& s) {
+    auto const n = std::min(s.find_first_not_of("0123456789"), s.size());
+    s.remove_prefix(n);
+    return n != 0U;
+  };
+  // ASCII decimal syntax with an optional sign, fraction and exponent.
+  auto rest = std::string_view{token};
+  consume_sign(rest);
+  auto has_digits = consume_digits(rest);
+  if (rest.starts_with('.')) {
+    rest.remove_prefix(1U);
+    has_digits = consume_digits(rest) || has_digits;
+  }
+  if (rest.starts_with('e') || rest.starts_with('E')) {
+    rest.remove_prefix(1U);
+    consume_sign(rest);
+    has_digits = consume_digits(rest) && has_digits;
+  }
+  if (!has_digits || !rest.empty()) {
+    throw std::runtime_error(fmt::format("bad number '{}'", token));
+  }
+  auto value = 0.0;
+  try {
+    value = std::stod(token);
+  } catch (std::out_of_range const&) {
+    throw std::runtime_error(
+        fmt::format("opportunity count out of range '{}'", token));
+  }
+  if (!std::isfinite(value) || value < 0.0) {
+    throw std::runtime_error(
+        "opportunity counts must be finite and non-negative");
+  }
+  return value == 0.0 ? 0.0 : value;
+}
+
+opportunity_data read_opportunities(args const& a, std::uint32_t n_dests) {
+  auto const cols = a.str("opportunity-columns", "");
+  if (cols.empty()) {
+    throw std::runtime_error("missing --opportunity-columns");
+  }
+  auto const table = read_csv(a.str("opportunities"));
+  if (table.rows_.size() != n_dests) {
+    throw std::runtime_error(
+        fmt::format("--opportunities: {} rows, expected {} destinations",
+                    table.rows_.size(), n_dests));
+  }
+  for (auto i = std::size_t{0U}; i < table.rows_.size(); ++i) {
+    auto const width = table.rows_[i].size();
+    if (width != table.header_.size()) {
+      throw std::runtime_error(
+          fmt::format("--opportunities: row {}: expected {} columns, got {}",
+                      i + 1U, table.header_.size(), width));
+    }
+  }
+  auto out = opportunity_data{};
+  for (auto const name : split(cols, ',')) {
+    auto const col = table.col(name);
+    auto& values = out.values_.emplace_back();
+    values.reserve(n_dests);
+    for (auto const& row : table.rows_) {
+      values.push_back(parse_opportunity_count(row[col]));
+    }
+    out.names_.emplace_back(name);
+  }
+  return out;
 }
 
 // Points: CSV with lat,lon columns; row order defines the point index.
@@ -1108,6 +1225,458 @@ n::routing::raptor_state const& one_to_all_reuse(TT const& tt,
   return c.state_;
 }
 
+// ------------------------------------- r5r-style travel time / accessibility
+// Ports of Conveyal R5 (github.com/conveyal/r5, dev 500ce263, 2026-11-11):
+// analyst/TravelTimeReducer.java (percentiles, accessibility accumulation) and
+// analyst/decay/*.java. Inputs here are whole minutes (Nigiri resolution)
+// passed to the R5 formulas as seconds (60 * minutes). R5 evaluates exp/log
+// with FastMath; std::exp / std::log may differ in the last bit.
+namespace r5 {
+
+constexpr auto kUnreached = std::numeric_limits<std::int32_t>::max();
+constexpr auto kTwoHours = 2 * 60 * 60;
+constexpr auto kZeroEpsilon = 0.001;
+
+// TravelTimeReducer.findPercentileIndex, (int) ceil(p / 100 * n) - 1: the
+// smallest value such that no more than p % of the sorted list is below it
+// (non-interpolated). Percentiles are integers 1..100 (R5's task.percentiles is
+// an int[]); the rank is computed in exact integer arithmetic,
+// ceil(p * n / 100) = (p * n + 99) / 100, so that it cannot drift on exact
+// boundaries (in doubles 7 / 100.0 * 100 > 7).
+int percentile_index(int const n, int const p) {
+  return (p * n + 99) / 100 - 1;
+}
+
+struct decay {
+  enum class kind {
+    kStep,
+    kLinear,
+    kExponential,
+    kFixedExponential,
+    kLogistic
+  } kind_;
+  int width_seconds_{}, half_width_seconds_{};
+  std::vector<double> linear_table_;
+  double decay_constant_{};
+  double sd_seconds_{};
+
+  static decay parse(std::string const& spec) {
+    auto d = decay{};
+    auto const colon = spec.find(':');
+    auto const name = spec.substr(0, colon);
+    auto const param =
+        colon == std::string::npos ? std::string{} : spec.substr(colon + 1);
+    if (name == "step") {
+      d.kind_ = kind::kStep;
+    } else if (name == "linear") {  // linear:WIDTH_MINUTES, 0 <= W < 60
+      d.kind_ = kind::kLinear;
+      auto const w = std::stoi(param);
+      if (w < 0 || w >= 60) {
+        throw std::runtime_error(
+            "linear decay width must be in [0, 60) minutes");
+      }
+      d.width_seconds_ = w * 60;
+      d.half_width_seconds_ = d.width_seconds_ / 2;
+      for (auto s = 0; s < d.width_seconds_; ++s) {
+        d.linear_table_.push_back(1 - ((s + 0.5) / d.width_seconds_));
+      }
+    } else if (name == "exponential") {  // half-life = cutoff
+      d.kind_ = kind::kExponential;
+    } else if (name == "fixed-exponential") {  // fixed-exponential:K, per
+                                               // second, 0 < K < 1
+      d.kind_ = kind::kFixedExponential;
+      d.decay_constant_ = std::stod(param);
+      if (!(d.decay_constant_ > 0 && d.decay_constant_ < 1)) {
+        throw std::runtime_error(
+            "fixed-exponential decay constant must be in (0, 1)");
+      }
+    } else if (name == "logistic") {  // logistic:SD_MINUTES
+      d.kind_ = kind::kLogistic;
+      d.sd_seconds_ = std::stod(param) * 60;
+      if (!(d.sd_seconds_ > 0 && d.sd_seconds_ < kTwoHours)) {
+        throw std::runtime_error(
+            "logistic standard deviation must be in (0, 120) minutes");
+      }
+    } else {
+      throw std::runtime_error(fmt::format("unknown decay function {}", spec));
+    }
+    return d;
+  }
+
+  double weight(int const cutoff, int const t) const {
+    switch (kind_) {
+      case kind::kStep: return t < cutoff ? 1 : 0;
+      case kind::kLinear: {
+        auto const idx = t - (cutoff - half_width_seconds_);
+        if (idx < 0) {
+          return 1;
+        }
+        return idx < width_seconds_
+                   ? linear_table_[static_cast<std::size_t>(idx)]
+                   : 0;
+      }
+      case kind::kExponential:
+        if (t <= 0) {
+          return 1;
+        }
+        if (t >= kTwoHours) {
+          return 0;
+        }
+        return std::exp(std::log(0.5) / cutoff * t);
+      case kind::kFixedExponential:
+        if (t <= 0) {
+          return 1;
+        }
+        if (t >= kTwoHours) {
+          return 0;
+        }
+        return std::exp(-decay_constant_ * t);
+      case kind::kLogistic: {
+        auto const g = [&](int const median, int const tt) {
+          return 1 + std::exp(((tt - median) * std::numbers::pi) /
+                              (sd_seconds_ * std::numbers::sqrt3));
+        };
+        return g(cutoff, 0) / g(cutoff, t);
+      }
+    }
+    return 0;
+  }
+
+  // DecayFunction.reachesZeroAt (step / linear override; others bisect).
+  int reaches_zero_at(int const cutoff) const {
+    if (kind_ == kind::kStep) {
+      return cutoff;
+    }
+    if (kind_ == kind::kLinear) {
+      return cutoff + half_width_seconds_;
+    }
+    auto low = 0;
+    auto high = 4 * 60 * 60;
+    while (low < high) {
+      auto const mid = (low + high) / 2;
+      if (weight(cutoff, mid) < kZeroEpsilon) {
+        high = mid;
+      } else {
+        low = mid + 1;
+      }
+    }
+    return low;
+  }
+};
+
+}  // namespace r5
+
+// --percentiles / --cutoffs of `route --r5r-out` and `r5r-reduce` (and
+// r5r_reference.py): strictly increasing, unique integers in [lo, hi]. Each
+// percentile and cutoff is evaluated on its own; the order only fixes the
+// output order (and R5's early exit over sorted cutoffs).
+std::vector<int> parse_strictly_increasing(std::string const& spec,
+                                           int const lo,
+                                           int const hi,
+                                           std::string_view const name) {
+  auto v = std::vector<int>{};
+  for (auto const x : split(spec, ',')) {
+    auto const i = parse_num<int>(x);
+    if (i < lo || i > hi) {
+      throw std::runtime_error(fmt::format(
+          "--{}: {} is not an integer in [{}, {}]", name, i, lo, hi));
+    }
+    if (!v.empty() && i <= v.back()) {
+      throw std::runtime_error(fmt::format(
+          "--{} must be strictly increasing and unique, got {} after {}", name,
+          i, v.back()));
+    }
+    v.push_back(i);
+  }
+  return v;
+}
+
+// r5r-style outputs of one window, shared by `route --r5r-out` and
+// `r5r-reduce`. ttm.bin: magic "VRR5TTM1", u32 version 1, u32 n_dests, u32
+// n_percentiles, u32 n_departures, f64 percentiles[n_percentiles] (integers),
+// then per origin (completion order) u32 origin + u16
+// minutes[n_dests][n_percentiles] (65535 = not reached within the cap at that
+// percentile). accessibility.csv:
+// origin,opportunity,percentile,cutoff,accessibility. Per origin: for each
+// destination sort its per-departure travel times (seconds, unreached last),
+// take the percentiles, then accumulate opportunities with the decay function
+// in destination order (as TravelTimeReducer does).
+struct r5r_output {
+  r5r_output(fs::path const& dir,
+             std::uint32_t const n_dests,
+             std::uint32_t const n_deps,
+             std::vector<int> percentiles,
+             std::vector<int> cutoffs_min,
+             std::string const& decay_spec,
+             std::vector<std::vector<double>> opportunities,
+             std::vector<std::string> opportunity_names)
+      : n_dests_{n_dests},
+        n_deps_{n_deps},
+        percentiles_{std::move(percentiles)},
+        cutoffs_min_{std::move(cutoffs_min)},
+        decay_{r5::decay::parse(decay_spec)},
+        opportunities_{std::move(opportunities)},
+        opportunity_names_{std::move(opportunity_names)} {
+    for (auto const pc : percentiles_) {
+      pct_idx_.push_back(r5::percentile_index(static_cast<int>(n_deps_), pc));
+    }
+    for (auto const c : cutoffs_min_) {
+      zero_points_.push_back(decay_.reaches_zero_at(c * 60));
+    }
+    fs::create_directories(dir);
+    ttm_.open(dir / "ttm.bin", std::ios::binary);
+    ttm_.write("VRR5TTM1", 8);
+    auto const hdr = std::array<std::uint32_t, 4>{
+        1U, n_dests_, static_cast<std::uint32_t>(percentiles_.size()), n_deps_};
+    ttm_.write(reinterpret_cast<char const*>(hdr.data()), sizeof(hdr));
+    for (auto const pc : percentiles_) {
+      auto const d = static_cast<double>(pc);
+      ttm_.write(reinterpret_cast<char const*>(&d), sizeof(d));
+    }
+    acc_.open(dir / "accessibility.csv");
+    acc_ << "origin,opportunity,percentile,cutoff,accessibility\n";
+  }
+
+  // buf: n_deps x n_dests travel minutes (departure-major), `unreachable` =
+  // none
+  template <typename T>
+  void origin(std::uint32_t const o, T const* buf, T const unreachable) {
+    auto const n_p = percentiles_.size();
+    auto ttm =
+        std::vector<std::uint16_t>(static_cast<std::size_t>(n_dests_) * n_p);
+    auto acc = std::vector<double>(
+        opportunities_.size() * n_p * cutoffs_min_.size(), 0.0);
+    auto times = std::vector<std::int32_t>(n_deps_);
+    auto pt = std::vector<std::int32_t>(n_p);
+    for (auto d = 0U; d != n_dests_; ++d) {
+      for (auto di = 0U; di != n_deps_; ++di) {
+        auto const v = buf[static_cast<std::size_t>(di) * n_dests_ + d];
+        times[di] = v == unreachable ? r5::kUnreached
+                                     : static_cast<std::int32_t>(v) * 60;
+      }
+      std::sort(begin(times), end(times));
+      for (auto pi = 0U; pi != n_p; ++pi) {
+        pt[pi] = times[static_cast<std::size_t>(pct_idx_[pi])];
+        ttm[static_cast<std::size_t>(d) * n_p + pi] =
+            pt[pi] == r5::kUnreached ? std::uint16_t{0xFFFFU}
+                                     : static_cast<std::uint16_t>(pt[pi] / 60);
+      }
+      for (auto oi = 0U; oi != opportunities_.size(); ++oi) {
+        auto const count = opportunities_[oi][d];
+        if (!(count > 0)) {
+          continue;
+        }
+        for (auto pi = 0U; pi != n_p; ++pi) {
+          auto const t = pt[pi];
+          if (t == r5::kUnreached) {
+            continue;  // this percentile only; the others are independent
+          }
+          for (auto ci = static_cast<int>(cutoffs_min_.size()) - 1; ci >= 0;
+               --ci) {
+            if (t >= zero_points_[static_cast<std::size_t>(ci)]) {
+              break;
+            }
+            auto const w = decay_.weight(
+                cutoffs_min_[static_cast<std::size_t>(ci)] * 60, t);
+            if (w > 0) {
+              acc[(oi * n_p + pi) * cutoffs_min_.size() +
+                  static_cast<std::size_t>(ci)] += count * w;
+            }
+          }
+        }
+      }
+    }
+    auto lines = std::string{};
+    for (auto oi = 0U; oi != opportunities_.size(); ++oi) {
+      for (auto pi = 0U; pi != n_p; ++pi) {
+        for (auto ci = 0U; ci != cutoffs_min_.size(); ++ci) {
+          lines +=
+              fmt::format("{},{},{},{},{:.17g}\n", o, opportunity_names_[oi],
+                          percentiles_[pi], cutoffs_min_[ci],
+                          acc[(oi * n_p + pi) * cutoffs_min_.size() + ci]);
+        }
+      }
+    }
+    auto const lock = std::lock_guard{mutex_};
+    ttm_.write(reinterpret_cast<char const*>(&o), sizeof(o));
+    ttm_.write(
+        reinterpret_cast<char const*>(ttm.data()),
+        static_cast<std::streamsize>(ttm.size() * sizeof(std::uint16_t)));
+    acc_ << lines;
+  }
+
+  void close() {
+    ttm_.close();
+    acc_.close();
+    if (!ttm_ || !acc_) {
+      throw std::runtime_error("r5r write failed");
+    }
+  }
+
+  std::uint32_t n_dests_, n_deps_;
+  std::vector<int> percentiles_, cutoffs_min_;
+  r5::decay decay_;
+  std::vector<std::vector<double>> opportunities_;
+  std::vector<std::string> opportunity_names_;
+  std::vector<int> pct_idx_, zero_points_;
+  std::ofstream ttm_, acc_;
+  std::mutex mutex_;
+};
+
+// r5r-selftest: hand-ranked boundaries. With N travel times that are a
+// permutation of 1..N minutes, percentile p is the value at rank ceil(p * N /
+// 100) (counted from 1), here obtained by counting: the smallest rank k with
+// 100 * k >= p * N. Checks every p in 1..100 for N in {1, 2, 3, 7, 30, 99, 100,
+// 101, 120, 150, 151, 1440}, through r5r_output itself (one origin, one
+// destination). Exit 0 if all agree.
+int cmd_r5r_selftest(args const& a) {
+  auto const dir = fs::path{a.str("out")};
+  a.check_all_used();
+  auto failures = 0;
+  auto checked = 0;
+  for (auto const n : {1, 2, 3, 7, 30, 99, 100, 101, 120, 150, 151, 1440}) {
+    auto ps = std::vector<int>{};
+    for (auto p = 1; p <= 100; ++p) {
+      ps.push_back(p);
+    }
+    auto buf = std::vector<std::uint16_t>(static_cast<std::size_t>(n));
+    for (auto i = 0; i != n; ++i) {
+      buf[static_cast<std::size_t>(i)] =
+          static_cast<std::uint16_t>(((i * 37) % n) + 1);  // a permutation
+    }
+    auto const sub = dir / fmt::format("n{}", n);
+    {
+      auto out = r5r_output{
+          sub, 1U, static_cast<std::uint32_t>(n), ps, {}, "step", {}, {}};
+      out.origin(0U, buf.data(), std::uint16_t{0xFFFFU});
+      out.close();
+    }
+    auto in = std::ifstream{sub / "ttm.bin", std::ios::binary};
+    auto bytes = std::vector<char>((std::istreambuf_iterator<char>(in)),
+                                   std::istreambuf_iterator<char>());
+    auto const off = 8U + 16U + 8U * ps.size() + 4U;
+    for (auto pi = 0U; pi != ps.size(); ++pi) {
+      auto v = std::uint16_t{};
+      std::memcpy(&v, bytes.data() + off + 2U * pi, 2U);
+      auto k = 1;
+      while (100 * k < ps[pi] * n) {
+        ++k;
+      }
+      ++checked;
+      if (v != k) {
+        ++failures;
+        fmt::println("N={} p={}: got {} expected {}", n, ps[pi], v, k);
+      }
+    }
+  }
+  fmt::println("{{\"r5r_selftest_checked\":{},\"failures\":{}}}", checked,
+               failures);
+  return failures == 0 ? 0 : 3;
+}
+
+// r5r-reduce: the same r5r-style outputs from a raw `route --out` stream (the
+// output-equivalent "raw stream + reducer" path).
+int cmd_r5r_reduce(args const& a) {
+  auto const stream = fs::path{a.str("stream")};
+  auto const dir = fs::path{a.str("r5r-out")};
+  auto in = std::ifstream{stream, std::ios::binary};
+  if (!in) {
+    throw std::runtime_error(fmt::format("cannot open {}", stream.string()));
+  }
+  // every read must deliver exactly the bytes the format requires
+  auto const read_exact = [&](void* dst, std::size_t const n,
+                              std::string_view const what) {
+    in.read(static_cast<char*>(dst), static_cast<std::streamsize>(n));
+    if (static_cast<std::size_t>(in.gcount()) != n) {
+      throw std::runtime_error(fmt::format(
+          "truncated stream: {} ({} of {} bytes)", what, in.gcount(), n));
+    }
+  };
+  char magic[8];
+  read_exact(magic, 8, "magic");
+  if (std::string_view{magic, 8} != "VRTTMATX") {
+    throw std::runtime_error("not a route stream");
+  }
+  auto hdr = std::array<std::uint32_t,
+                        6>{};  // version, n_total, n_dests, n_dep, from, to
+  read_exact(hdr.data(), sizeof(hdr), "header");
+  auto cap = std::uint16_t{};
+  auto flags = std::uint8_t{};
+  auto target = std::uint8_t{};
+  read_exact(&cap, 2, "header");
+  read_exact(&flags, 1, "header");
+  read_exact(&target, 1, "header");
+  auto reserved = std::array<char, 20>{};
+  read_exact(reserved.data(), reserved.size(), "header");
+  if (hdr[0] != 1U) {
+    throw std::runtime_error(
+        fmt::format("unsupported stream version {}", hdr[0]));
+  }
+  auto const n_dests = hdr[2];
+  auto const n_deps = hdr[3];
+  if (n_deps == 0U) {
+    throw std::runtime_error("stream n_departures must be at least 1");
+  }
+  auto departures = std::vector<std::int64_t>(n_deps);
+  read_exact(departures.data(), 8U * n_deps, "departures");
+  auto const percentiles = parse_strictly_increasing(a.str("percentiles", "50"),
+                                                     1, 100, "percentiles");
+  auto cutoffs_min = std::vector<int>{};
+  auto opportunities = opportunity_data{};
+  auto decay_spec = std::string{"step"};
+  if (a.has("opportunities")) {
+    cutoffs_min =
+        parse_strictly_increasing(a.str("cutoffs"), 1, 240, "cutoffs");
+    decay_spec = a.str("decay", "step");
+    opportunities = read_opportunities(a, n_dests);
+  }
+  a.check_all_used();
+  auto out = r5r_output{dir,
+                        n_dests,
+                        n_deps,
+                        percentiles,
+                        cutoffs_min,
+                        decay_spec,
+                        opportunities.values_,
+                        opportunities.names_};
+  auto const block = static_cast<std::size_t>(n_deps) * n_dests;
+  // optional transfers (u8) and egress-stop (u32) blocks, read and discarded
+  auto const extra =
+      ((flags & 1U) ? block : 0U) + ((flags & 2U) ? 4U * block : 0U);
+  auto tail = std::vector<char>(extra);
+  auto const read_origins = [&](auto const type_tag) {
+    auto seen = std::unordered_set<std::uint32_t>{};
+    using T = std::decay_t<decltype(type_tag)>;
+    auto buf = std::vector<T>(block);
+    while (true) {
+      auto o = std::uint32_t{};
+      in.read(reinterpret_cast<char*>(&o), sizeof(o));
+      if (in.gcount() == 0 && in.eof()) {
+        break;  // clean end: no bytes after the last complete record
+      }
+      if (in.gcount() != sizeof(o)) {
+        throw std::runtime_error(fmt::format(
+            "truncated stream: {} trailing byte(s), not a complete origin id",
+            in.gcount()));
+      }
+      if (!seen.insert(o).second) {
+        throw std::runtime_error(
+            fmt::format("duplicate stream record for origin {}", o));
+      }
+      read_exact(buf.data(), block * sizeof(T), "travel-time block");
+      read_exact(tail.data(), extra, "transfer / egress-stop block");
+      out.origin(o, buf.data(), std::numeric_limits<T>::max());
+    }
+  };
+  if (flags & 4U) {
+    read_origins(std::uint16_t{});
+  } else {
+    read_origins(std::uint8_t{});
+  }
+  out.close();
+  return 0;
+}
+
 // ------------------------------------------ Range-RAPTOR over a window
 // --range: per origin, one raptor runs the departures of the window latest
 // first, as Nigiri's range search does: between departures only
@@ -1221,11 +1790,16 @@ int cmd_route(args const& a) {
   // Optional explicit origin subset (comma-separated indices), else the range.
   auto origin_list = std::vector<std::uint32_t>{};
   if (a.has("origin-list")) {
+    auto seen = std::unordered_set<std::uint32_t>{};
     auto const list = a.str("origin-list");  // keep alive: split returns views
     for (auto const x : split(list, ',')) {
       auto const v = parse_num<std::uint32_t>(x);
       if (v >= n_origins) {
         throw std::runtime_error("origin-list entry out of range");
+      }
+      if (!seen.insert(v).second) {
+        throw std::runtime_error(
+            fmt::format("duplicate origin-list entry {}", v));
       }
       origin_list.push_back(v);
     }
@@ -1323,10 +1897,37 @@ int cmd_route(args const& a) {
         fmt::format("--pin-threads: {} threads but only {} allowed cpus",
                     n_threads, cpus.size()));
   }
-  auto const out_path = a.str("out");
+  auto const out_path = a.str("out", "");
   auto const timing_path = a.str("timing-json", "");
   auto const discard =
       a.has("discard");  // timing-only: compute, write no records
+
+  // r5r-style outputs (--r5r-out DIR): per origin, over the departures of the
+  // window, percentiles of travel time to each destination (ttm.bin) and, with
+  // --opportunities, accessibility per percentile and cutoff
+  // (accessibility.csv).
+  auto const r5r_dir = a.str("r5r-out", "");
+  auto const emit_r5r = !r5r_dir.empty();
+  if (out_path.empty() && !emit_r5r) {
+    throw std::runtime_error("missing --out (or --r5r-out)");
+  }
+  auto percentiles = std::vector<int>{};
+  auto cutoffs_min = std::vector<int>{};
+  auto opportunities = opportunity_data{};
+  auto decay_spec = std::string{"step"};
+  if (emit_r5r) {
+    percentiles = parse_strictly_increasing(a.str("percentiles", "50"), 1, 100,
+                                            "percentiles");
+    if (a.has("opportunities")) {
+      cutoffs_min =
+          parse_strictly_increasing(a.str("cutoffs"), 1, 240, "cutoffs");
+      decay_spec = a.str("decay", "step");
+      opportunities = read_opportunities(a, n_dests);
+    }
+  }
+  if (emit_r5r) {
+    r5::decay::parse(decay_spec);  // validate before routing
+  }
 
   auto const t_conn = clock_t_::now();
   auto const access =
@@ -1363,7 +1964,11 @@ int cmd_route(args const& a) {
   auto const clasz_mask =
       motis::to_clasz_mask(std::vector{motis::api::ModeEnum::TRANSIT});
 
-  auto out = std::ofstream{out_path, std::ios::binary};
+  auto const write_stream = !out_path.empty();
+  auto out = std::ofstream{};
+  if (write_stream) {
+    out.open(out_path, std::ios::binary);
+  }
   auto h = stream_header{};
   h.n_origins_total_ = n_origins;
   h.n_dests_ = n_dests;
@@ -1390,6 +1995,12 @@ int cmd_route(args const& a) {
   auto reuse_scan_ns = std::atomic_uint64_t{0U};
   auto reuse_finish_ns = std::atomic_uint64_t{0U};
   auto const t_route = clock_t_::now();
+
+  auto r5r = std::optional<r5r_output>{};
+  if (emit_r5r) {
+    r5r.emplace(r5r_dir, n_dests, dep_count, percentiles, cutoffs_min,
+                decay_spec, opportunities.values_, opportunities.names_);
+  }
 
   // The travel-time buffer uses the narrowest record type (u8 for caps <= 253,
   // else u16): the egress loop is memory-bound and a u16 buffer slowed it by
@@ -1551,7 +2162,10 @@ int cmd_route(args const& a) {
                 .count());
       }
       auto const tw = clock_t_::now();
-      if (!discard) {
+      if (emit_r5r) {
+        r5r->origin(o, tt_buf.data(), kUnreachableT);
+      }
+      if (!discard && write_stream) {
         auto const lock = std::lock_guard{write_mutex};
         out.write(reinterpret_cast<char const*>(&o), sizeof(o));
         out.write(reinterpret_cast<char const*>(tt_buf.data()),
@@ -1593,9 +2207,14 @@ int cmd_route(args const& a) {
   for (auto& th : threads) {
     th.join();
   }
-  out.close();
-  if (!out) {
-    throw std::runtime_error("write failed");
+  if (write_stream) {
+    out.close();
+    if (!out) {
+      throw std::runtime_error("write failed");
+    }
+  }
+  if (emit_r5r) {
+    r5r->close();
   }
   auto const route_ms = ms_since(t_route);
   auto const json = fmt::format(
@@ -1650,6 +2269,10 @@ int main(int ac, char** av) {
       return cmd_direct(a);
     } else if (cmd == "route") {
       return cmd_route(a);
+    } else if (cmd == "r5r-reduce") {
+      return cmd_r5r_reduce(a);
+    } else if (cmd == "r5r-selftest") {
+      return cmd_r5r_selftest(a);
     }
     fmt::println(stderr, "unknown command {}", cmd);
     return 1;

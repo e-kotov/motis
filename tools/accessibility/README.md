@@ -25,7 +25,9 @@ motis-accessibility route      --data DIR --n-origins N [--n-dests M] --access A
                                --dep-start-unix-minutes T0 [--dep-count C] [--dep-step-minutes S] --max-travel-minutes CAP \
                                [--max-transfers 0..14] [--target dests|stops] [--egress-rounds transit|all] \
                                [--origin-from I --origin-to J | --origin-list I,J,..] [--with-transfers] [--with-egress-stop] \
-                               [--threads T] [--pin-threads] [--reuse-state] [--range] [--discard] --out stream.bin [--timing-json t.json]
+                               [--threads T] [--pin-threads] [--reuse-state] [--range] [--discard] [--out stream.bin] [--timing-json t.json] \
+                               [--r5r-out DIR [--percentiles P,..] [--opportunities cells.csv --opportunity-columns C,.. \
+                                --cutoffs MIN,.. [--decay step|linear:W|exponential|fixed-exponential:K|logistic:SD]]]
 ```
 
 ### `stops`
@@ -161,6 +163,62 @@ Bounds and modes:
 Nigiri `one_to_all` keeps a round's arrival at a stop only if it is strictly earlier
 than all earlier rounds. With stock egress (k ≥ 1 only), a stop reachable on foot
 from the origin no later than by transit therefore offers no transit egress.
+
+### r5r-style outputs (`route --r5r-out DIR`)
+
+These outputs are computed per origin while routing, over the departures of the
+window, so no raw per-departure matrix is written. Without `--out`, no stream is
+written at all. The definitions are ports of Conveyal R5 (`analyst/TravelTimeReducer.java`
+and `analyst/decay/*.java`, `conveyal/r5` dev `500ce263`), which `r5r` wraps.
+
+- **Travel-time percentiles** (like `r5r::travel_time_matrix()`). For each
+  destination, its travel times over the departures are sorted, with unreached
+  last. Percentile *p* is the element at index ⌈p/100 · n⌉ − 1: no interpolation, the
+  smallest value with no more than *p* % of the times below it.
+  - Percentiles are **integers 1–100**, as R5's `int[]`, and the rank is computed
+    exactly as (p·n + 99) / 100 in integer arithmetic.
+  - `--percentiles` and `--cutoffs` (1–240 minutes) must be **strictly increasing
+    and unique**. `route --r5r-out`, `r5r-reduce` and `r5r_reference.py` reject
+    anything else, for example `100,7` or `7,7`. Each percentile is evaluated on
+    its own. With `--opportunities`, a non-empty `--cutoffs` list is required;
+    all three reject an omitted or empty (`""`) one (exit 2).
+  - Floating-point evaluation drifts on exact boundaries: for n = 100 it misranks
+    p = 7, 14, 28, 55 and 56. Unreached means
+  later than `--max-travel-minutes`, as r5r's `max_trip_duration`. Times are whole
+  Nigiri minutes; R5 works in seconds and truncates to minutes, which gives the same
+  values for whole minutes.
+- **Accessibility** (like `r5r::accessibility()`). For each opportunity column,
+  percentile and cutoff, the sum over destinations of opportunities × weight. The
+  weight uses the percentile travel time (as seconds) and R5's decay functions:
+  - `step`: 1 if t < cutoff;
+  - `linear:W` (width W minutes): R5's per-second table over cutoff ± W/2;
+  - `exponential`: half-life = cutoff;
+  - `fixed-exponential:K`: exp(−K·t), with K per second;
+  - `logistic:SD` (SD in minutes).
+
+  Opportunities beyond R5's zero point are skipped: the bisection to weight < 0.001
+  for the asymptotic functions. R5 evaluates `exp` and `log` with FastMath, so values
+  can differ from `std::exp` in the last bit; for `step` and `linear` the definitions
+  are exact. Cutoffs and percentiles must be ascending.
+- **Files:**
+  - `ttm.bin`: magic `VRR5TTM1`, `u32` version 1, n_dests, n_percentiles,
+    n_departures, `f64` percentiles[]. Then, per origin in completion order: `u32`
+    origin and `u16` minutes [n_dests][n_percentiles], with 65535 for unreached.
+  - `accessibility.csv`: `origin,opportunity,percentile,cutoff,accessibility`.
+- **`motis-accessibility r5r-reduce --stream S.bin --r5r-out DIR ...`** computes
+  the same two files from a raw `route --out` stream, with the same options. It is
+  the output-equivalent "raw stream + reducer" path.
+- **`motis-accessibility r5r-selftest --out DIR`** checks the percentile ranks
+  against hand-ranked boundaries: times 1..N, every p in 1..100, N from 1 to 1440.
+- **Stream reading:** `r5r-reduce` and `r5r_reference.py` require complete records,
+  including the optional transfer and egress-stop blocks. They reject a truncated
+  record or trailing bytes after the last record (exit 2).
+- **`r5r_test.py TMP [motis-accessibility]`** runs regression tests on a synthetic
+  stream: rejected percentile lists, an omitted or empty `--cutoffs` with
+  `--opportunities`, a stream missing its final byte, and a stream with a trailing
+  byte, plus, with the binary, `r5r-reduce` against the reference.
+- **Reference check:** `r5r_reference.py --stream S.bin --r5r-dir DIR ...` recomputes
+  both files from a raw `--out` stream of the same run, using only the standard library.
 
 ## Stream format (`VRTTMATX`, version 1, little-endian)
 
