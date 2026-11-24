@@ -112,45 +112,78 @@ def stage3_cases(tmp, binary, route_data, valid, opp, tt_hand, expect):
                  n_dests=2, n_dep=1)
     quoted = work / "quoted.csv"
     quoted.write_text('label,pop\n"district,99",10\n"district,98",0\n', encoding="utf-8")
-    escapes = work / "quoted-crlf.csv"
-    escapes.write_bytes(b'\r\n"label","pop"\r\n"district ""A"",99"," +0x1.4p3"\r\n'
-                        b'\n"district ""B"",98",0\r\n')
 
-    def csv_cases(cases):
-        for name, data, reason in cases:
-            path = work / f"{name}.csv"
-            path.write_bytes(data)
-            yield path, reason
+    def csv_fixture(name, data):
+        path = work / f"{name}.csv"
+        path.write_bytes(data)
+        return path
 
-    malformed = list(csv_cases([
+    def token_row(token):
+        return b"label,pop\nfirst,10\nsecond," + token + b"\n"
+
+    valid_csv = [
+        (quoted, 0),
+        (csv_fixture("quoted-crlf", b'\r\n"label","pop"\r\n"district ""A"",99","+1e1"\r\n'
+                                   b'\n"district ""B"",98",-0.0\r\n'), 0),
+        (csv_fixture("duplicate-header", b"label,pop,pop\na,10,450\nb,0,120\n"), 0),
+        (csv_fixture("empty-unused-header", b",pop\na,10\nb,0\n"), 0),
+    ]
+    for name, token, value in (
+        ("leading-plus", b"+10", 10),
+        ("scientific", b"1e2", 100),
+        ("negative-exponent", b"1.5e-2", 0.015),
+        ("leading-dot", b".5", 0.5),
+        ("trailing-dot", b"5.", 5),
+        ("signed-exponent", b"+.5E+1", 5),
+        ("negative-zero", b"-0.0", 0),
+    ):
+        valid_csv.append((csv_fixture(name, token_row(token)), value))
+
+    malformed = [
         ("unclosed", b'label,pop\n"district,99,10\ndistrict,0\n', "unclosed quoted CSV field"),
-        ("unclosed-last", b'label,pop\n"district,99",10\n"district,98","0', "unclosed quoted CSV field"),
+        ("unclosed-last", b'label,pop\n"district,99",10\n"district,98","0\n', "unclosed quoted CSV field"),
+        ("unclosed-last-no-lf", b'label,pop\n"district,99",10\n"district,98","0', "unclosed quoted CSV field"),
         ("unescaped-quote", b'label,pop\ndistr"ict,10\ndistrict,0\n', "quote in unquoted CSV field"),
         ("after-closing-quote", b'label,pop\n"district"x,10\ndistrict,0\n', "expected comma after quoted CSV field"),
-        ("trailing-number", b"label,pop\ndistrict,10oops\ndistrict,0\n", "bad number '10oops'"),
-        ("trailing-quote", b'label,pop\ndistrict,"99"""\ndistrict,0\n', "bad number '99\"'"),
-        ("trailing-space", b"label,pop\ndistrict,10 \ndistrict,0\n", "bad number '10 '"),
-        ("overflow", b"label,pop\ndistrict,10\ndistrict,1e999\n", "stod"),
-        ("underflow", b"label,pop\ndistrict,10\ndistrict,1e-999\n", "stod"),
+        ("space-before-quote", token_row(b' "0"'), "quote in unquoted CSV field"),
+        ("space-after-quote", token_row(b'"0" '), "expected comma after quoted CSV field"),
+        ("trailing-quote", token_row(b'"99"""'), "bad number '99\"'"),
+        ("quoted-leading-space", token_row(b'" 10"'), "bad number ' 10'"),
+        ("quoted-trailing-space", token_row(b'"10 "'), "bad number '10 '"),
+        ("overflow", token_row(b"1e999"), "opportunity count out of range '1e999'"),
+        ("underflow", token_row(b"1e-999"), "opportunity count out of range '1e-999'"),
+        ("empty-file", b"", "--opportunities: 0 rows, expected 2 destinations"),
+        ("blank-file", b"\r\n\n", "--opportunities: 0 rows, expected 2 destinations"),
+        ("spaces-only-line", token_row(b"0") + b"  \n", "--opportunities: 3 rows, expected 2 destinations"),
         ("malformed-header", b'la"bel,pop\ndistrict,10\ndistrict,0\n', "quote in unquoted CSV field"),
         ("missing-column", b"label,other\ndistrict,10\ndistrict,0\n", "column pop missing"),
+        ("empty-selected-header", b"label,\ndistrict,10\ndistrict,0\n", "column pop missing"),
         ("row-count", b"label,pop\ndistrict,10\n", "--opportunities: 1 rows, expected 2 destinations"),
-    ]))
-    # The reference additionally validates every row's width and count domain.
-    reference_errors = list(csv_cases([
         ("short-row", b"label,pop\ndistrict,10\ndistrict\n", "--opportunities: row 2: expected 2 columns, got 1"),
-        ("long-row", b"label,pop\ndistrict,10\ndistrict,0,extra\n", "--opportunities: row 2: expected 2 columns, got 3"),
-        ("negative", b"label,pop\ndistrict,10\ndistrict,-1\n", "opportunity counts must be finite and non-negative"),
-        ("nan", b"label,pop\ndistrict,10\ndistrict,nan\n", "opportunity counts must be finite and non-negative"),
-        ("infinity", b"label,pop\ndistrict,10\ndistrict,inf\n", "opportunity counts must be finite and non-negative"),
-    ]))
+        ("short-row-unused", b"label,pop,ignored\na,10,x\nb,0\n", "--opportunities: row 2: expected 3 columns, got 2"),
+        ("long-row", token_row(b"0,extra"), "--opportunities: row 2: expected 2 columns, got 3"),
+        ("negative", token_row(b"-1"), "opportunity counts must be finite and non-negative"),
+    ]
+    for name, token in (
+        ("nan", "NaN"), ("inf", "inf"), ("positive-inf", "+Inf"), ("negative-inf", "-Inf"),
+        ("infinity", "Infinity"), ("underscores", "1_0"), ("hex", "0x1p2"), ("trailing-number", "10oops"),
+        ("leading-space", " 10"), ("trailing-space", "10 "), ("leading-tab", "\t10"), ("trailing-tab", "10\t"),
+        ("empty-count", ""), ("spaces-count", "   "), ("no-number", "oops"), ("missing-exponent", "1e+"),
+        ("missing-mantissa", ".e1"), ("unicode-digit", "٧"),
+    ):
+        malformed.append((name, token_row(token.encode()), f"bad number '{token}'"))
+    invalid_csv = [(csv_fixture(name, data), reason) for name, data, reason in malformed]
 
-    hand = work / "tt-quoted"
-    write_ttm_only(hand, records={0: [5, 0xFFFF], 1: [0xFFFF, 5]}, n_dests=2, n_dep=1)
-    (hand / "accessibility.csv").write_text(
-        "origin,opportunity,percentile,cutoff,accessibility\n0,pop,50,30,10\n1,pop,50,30,0\n",
-        encoding="utf-8",
-    )
+    def hand_output(path, value):
+        out_dir = work / f"tt-{path.stem}"
+        write_ttm_only(out_dir, records={0: [5, 0xFFFF], 1: [0xFFFF, 5]}, n_dests=2, n_dep=1)
+        (out_dir / "accessibility.csv").write_text(
+            "origin,opportunity,percentile,cutoff,accessibility\n0,pop,50,30,10\n" f"1,pop,50,30,{value}\n",
+            encoding="utf-8",
+        )
+        return out_dir
+
+    hand = hand_output(quoted, 0)
 
     def options(path, cutoff="30"):
         return ["--opportunities", path, "--opportunity-columns", "pop", "--cutoffs", cutoff]
@@ -163,28 +196,28 @@ def stage3_cases(tmp, binary, route_data, valid, opp, tt_hand, expect):
             rc, out = run([binary, "r5r-reduce", "--stream", stream, "--r5r-out", work / "neg-stage3"] + extra)
             expect(f"r5r-reduce rejects {label}", rc == 2 and out == f"error: {reason}", f"(rc={rc}: {out[-160:]})")
 
-    def check_quoted(label, stream, path, out_dir):
+    def check_reference(label, stream, path, out_dir):
         rc, out = run([sys.executable, REF, "--stream", stream, "--r5r-dir", out_dir] + options(path))
         expect(f"{label} agrees with the reference", rc == 0 and "IDENTICAL" in out, f"(rc={rc}: {out[-240:]})")
 
     def check_compiled(mode, base, stream):
-        for path in (quoted, escapes):
+        for path, value in valid_csv:
             out_dir = work / f"{mode}-{path.stem}"
             rc, out = run(base + ["--r5r-out", out_dir] + options(path))
             expect(f"{mode} accepts {path.name}", rc == 0, f"(rc={rc}: {out[-160:]})")
             if rc == 0:
                 with (out_dir / "accessibility.csv").open(newline="") as f:
                     totals = sorted((int(row["origin"]), float(row["accessibility"])) for row in csv.DictReader(f))
-                expect(f"{mode} {path.name} totals", totals == [(0, 10), (1, 0)], str(totals))
-                check_quoted(f"{mode} {path.name}", stream, path, out_dir)
-        for path, reason in malformed:
+                expect(f"{mode} {path.name} totals", totals == [(0, 10), (1, value)], str(totals))
+                check_reference(f"{mode} {path.name}", stream, path, out_dir)
+        for path, reason in invalid_csv:
             rc, out = run(base + ["--r5r-out", work / f"{mode}-bad-csv"] + options(path))
             expect(f"{mode} rejects {path.name}",
                    rc == 2 and out.rpartition("\n")[2] == f"error: {reason}", f"(rc={rc}: {out[-160:]})")
 
-    check_quoted("hand-written quoted CSV output", quoted_stream, quoted, hand)
-    check_quoted("hand-written quoted and escaped CRLF CSV output", quoted_stream, escapes, hand)
-    for path, reason in malformed + reference_errors:
+    for path, value in valid_csv:
+        check_reference(f"hand-written {path.name} output", quoted_stream, path, hand_output(path, value))
+    for path, reason in invalid_csv:
         rc, out = run([sys.executable, REF, "--stream", quoted_stream, "--r5r-dir", hand] + options(path))
         expect(f"reference rejects {path.name}",
                rc == 2 and out == f"invalid: {reason}", f"(rc={rc}: {out[-240:]})")
@@ -202,7 +235,7 @@ def stage3_cases(tmp, binary, route_data, valid, opp, tt_hand, expect):
         rc, out = run(route + ["--out", stream])
         expect("route produces the quoted CSV case raw stream", rc == 0, f"(rc={rc}: {out[-160:]})")
         if rc == 0:
-            check_quoted("hand-written output for the raw route stream", stream, quoted, hand)
+            check_reference("hand-written output for the raw route stream", stream, quoted, hand)
             check_compiled("route", route, stream)
         rc, out = run(route + ["--origin-list", "0,0", "--out", work / "duplicate-origin-list.bin"])
         expect("route rejects --origin-list 0,0", rc == 2 and out.rpartition("\n")[2] == "error: duplicate origin-list entry 0",

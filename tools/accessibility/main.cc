@@ -295,6 +295,47 @@ struct opportunity_data {
   std::vector<std::string> names_;
 };
 
+double parse_opportunity_count(std::string const& token) {
+  auto const consume_sign = [](std::string_view& s) {
+    if (s.starts_with('+') || s.starts_with('-')) {
+      s.remove_prefix(1U);
+    }
+  };
+  auto const consume_digits = [](std::string_view& s) {
+    auto const n = std::min(s.find_first_not_of("0123456789"), s.size());
+    s.remove_prefix(n);
+    return n != 0U;
+  };
+  // ASCII decimal syntax with an optional sign, fraction and exponent.
+  auto rest = std::string_view{token};
+  consume_sign(rest);
+  auto has_digits = consume_digits(rest);
+  if (rest.starts_with('.')) {
+    rest.remove_prefix(1U);
+    has_digits = consume_digits(rest) || has_digits;
+  }
+  if (rest.starts_with('e') || rest.starts_with('E')) {
+    rest.remove_prefix(1U);
+    consume_sign(rest);
+    has_digits = consume_digits(rest) && has_digits;
+  }
+  if (!has_digits || !rest.empty()) {
+    throw std::runtime_error(fmt::format("bad number '{}'", token));
+  }
+  auto value = 0.0;
+  try {
+    value = std::stod(token);
+  } catch (std::out_of_range const&) {
+    throw std::runtime_error(
+        fmt::format("opportunity count out of range '{}'", token));
+  }
+  if (!std::isfinite(value) || value < 0.0) {
+    throw std::runtime_error(
+        "opportunity counts must be finite and non-negative");
+  }
+  return value == 0.0 ? 0.0 : value;
+}
+
 opportunity_data read_opportunities(args const& a, std::uint32_t n_dests) {
   auto const cols = a.str("opportunity-columns", "");
   if (cols.empty()) {
@@ -306,19 +347,21 @@ opportunity_data read_opportunities(args const& a, std::uint32_t n_dests) {
         fmt::format("--opportunities: {} rows, expected {} destinations",
                     table.rows_.size(), n_dests));
   }
+  for (auto i = std::size_t{0U}; i < table.rows_.size(); ++i) {
+    auto const width = table.rows_[i].size();
+    if (width != table.header_.size()) {
+      throw std::runtime_error(
+          fmt::format("--opportunities: row {}: expected {} columns, got {}",
+                      i + 1U, table.header_.size(), width));
+    }
+  }
   auto out = opportunity_data{};
   for (auto const name : split(cols, ',')) {
     auto const col = table.col(name);
     auto& values = out.values_.emplace_back();
     values.reserve(n_dests);
     for (auto const& row : table.rows_) {
-      auto const& token = row.at(col);
-      auto consumed = std::size_t{0U};
-      auto const value = std::stod(token, &consumed);
-      if (consumed != token.size()) {
-        throw std::runtime_error(fmt::format("bad number '{}'", token));
-      }
-      values.push_back(value);
+      values.push_back(parse_opportunity_count(row[col]));
     }
     out.names_.emplace_back(name);
   }

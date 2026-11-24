@@ -25,7 +25,8 @@ import sys
 UNREACHED = 2**31 - 1
 TWO_HOURS = 7200
 
-# std::stod uses strtod, including its hexadecimal syntax and range errors.
+# Match std::stod's range handling after checking the ASCII decimal syntax.
+OPPORTUNITY_DECIMAL = re.compile(rb"[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?")
 _strtod = ctypes.CDLL(None, use_errno=True).strtod
 _strtod.argtypes = (ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p))
 _strtod.restype = ctypes.c_double
@@ -126,17 +127,15 @@ def parse_csv_line(line):
 
 
 def opportunity_count(token):
-    start = ctypes.create_string_buffer(token)
-    end = ctypes.c_void_p()
-    ctypes.set_errno(0)
-    value = _strtod(start, ctypes.byref(end))
-    if ctypes.get_errno() == errno.ERANGE:
-        raise ValueError("stod")
-    if not token or end.value != ctypes.addressof(start) + len(token):
+    if OPPORTUNITY_DECIMAL.fullmatch(token) is None:
         raise ValueError(f"bad number '{token.decode('utf-8', errors='backslashreplace')}'")
+    ctypes.set_errno(0)
+    value = _strtod(token, None)
+    if ctypes.get_errno() == errno.ERANGE:
+        raise ValueError(f"opportunity count out of range '{token.decode('ascii')}'")
     if not math.isfinite(value) or value < 0:
         raise ValueError("opportunity counts must be finite and non-negative")
-    return value
+    return 0.0 if value == 0.0 else value
 
 
 def read_opportunities(path, columns, n_dests):
