@@ -36,7 +36,9 @@
 
 #include <pthread.h>
 #include <sched.h>
+#include <stdlib.h>
 #include <sys/resource.h>
+#include <unistd.h>
 
 #include "fmt/core.h"
 #include "fmt/ranges.h"
@@ -1789,37 +1791,57 @@ int cmd_stream_decode(args const& a) {
   auto const dense_bytes = cells * cell_bytes;
   auto const bitmap_bytes = (cells + 7U) / 8U;
 
-  // Never write into the input (same path, symlink or hard link), and
-  // publish the output only after the whole input decoded.
-  auto const tmp_path = fs::path{out_path.string() + ".partial"};
-  for (auto const& p : {out_path, tmp_path}) {
-    if (fs::exists(p) && fs::equivalent(in_path, p)) {
-      throw std::runtime_error(fmt::format(
-          "stream-decode: {} is the input stream", p.string()));
-    }
+  // Never write into the input (same path, symlink or hard link). The output
+  // goes to a new uniquely named file next to OUT (created exclusively, so no
+  // existing file is touched) and is renamed to OUT only after the whole input
+  // decoded; on any error only that file is removed.
+  if (fs::exists(out_path) && fs::equivalent(in_path, out_path)) {
+    throw std::runtime_error(fmt::format(
+        "stream-decode: {} is the input stream", out_path.string()));
   }
-  struct remove_partial {
-    ~remove_partial() {
+  auto tmpl = out_path.string() + ".partial-XXXXXX";
+  auto const fd = ::mkstemp(tmpl.data());
+  if (fd < 0) {
+    throw std::runtime_error(
+        fmt::format("cannot create a temporary file next to {}",
+                    out_path.string()));
+  }
+  struct partial_file {
+    ~partial_file() {
+      if (f_ != nullptr) {
+        std::fclose(f_);
+      }
       if (!done_) {
         auto ec = std::error_code{};
         fs::remove(path_, ec);
       }
     }
     fs::path path_;
+    std::FILE* f_{nullptr};
     bool done_{false};
-  } partial{tmp_path};
-  auto out = std::ofstream{tmp_path, std::ios::binary | std::ios::trunc};
-  if (!out) {
-    throw std::runtime_error(
-        fmt::format("cannot open {}", tmp_path.string()));
+  } partial{fs::path{tmpl}};
+  partial.f_ = ::fdopen(fd, "wb");
+  if (partial.f_ == nullptr) {
+    ::close(fd);
+    throw std::runtime_error(fmt::format("cannot open {}", tmpl));
   }
+  auto const write = [&](void const* src, std::size_t const n) {
+    if (std::fwrite(src, 1U, n, partial.f_) != n) {
+      throw std::runtime_error("write failed");
+    }
+  };
   auto const v1 = kFormatVersion;
   std::memcpy(hdr.data() + 8, &v1, 4);
-  out.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
-  out.write(deps.data(), static_cast<std::streamsize>(deps.size()));
+  write(hdr.data(), hdr.size());
+  write(deps.data(), deps.size());
 
-  auto dense = std::vector<char>(dense_bytes);
-  auto bitmap = std::vector<std::uint8_t>(bitmap_bytes);
+  // Buffers are sized from the header only once a record needs them, and only
+  // after the bytes that record must contain are known to be in the file.
+  auto const remaining = [&]() {
+    return in_size - static_cast<std::uintmax_t>(in.tellg());
+  };
+  auto dense = std::vector<char>{};
+  auto bitmap = std::vector<std::uint8_t>{};
   auto payload = std::vector<char>{};
   auto seen = std::unordered_set<std::uint32_t>{};
   auto n_records = std::uint64_t{0U};
@@ -1840,11 +1862,23 @@ int cmd_stream_decode(args const& a) {
     auto tag = std::uint8_t{};
     read_exact(&tag, 1U, "record encoding");
     if (tag == kRecordDense) {
+      if (dense_bytes > remaining()) {
+        throw std::runtime_error(fmt::format(
+            "truncated stream: dense record of origin {} needs {} bytes", o,
+            dense_bytes));
+      }
+      dense.resize(dense_bytes);
       read_exact(dense.data(), dense.size(), "dense record");
     } else if (tag == kRecordBitmap) {
       ++n_sparse;
+      if (4U + bitmap_bytes > remaining()) {
+        throw std::runtime_error(fmt::format(
+            "truncated stream: bitmap of origin {} needs {} bytes", o,
+            4U + bitmap_bytes));
+      }
       auto n = std::uint32_t{};
       read_exact(&n, 4U, "reached count");
+      bitmap.resize(bitmap_bytes);
       read_exact(bitmap.data(), bitmap.size(), "bitmap");
       auto count = std::size_t{0U};
       for (auto i = std::size_t{0U}; i != cells; ++i) {
@@ -1859,6 +1893,7 @@ int cmd_stream_decode(args const& a) {
       }
       payload.resize(static_cast<std::size_t>(n) * cell_bytes);
       read_exact(payload.data(), payload.size(), "bitmap payload");
+      dense.resize(dense_bytes);  // cells <= 8 x bitmap bytes read
       auto* d_tt = dense.data();
       auto* d_tr = d_tt + cells * tt_size;
       auto* d_via = d_tr + (has_tr ? cells : 0U);
@@ -1884,15 +1919,16 @@ int cmd_stream_decode(args const& a) {
       throw std::runtime_error(
           fmt::format("unknown record encoding {} for origin {}", tag, o));
     }
-    out.write(reinterpret_cast<char const*>(&o), sizeof(o));
-    out.write(dense.data(), static_cast<std::streamsize>(dense.size()));
+    write(&o, sizeof(o));
+    write(dense.data(), dense.size());
     ++n_records;
   }
-  out.close();
-  if (!out) {
+  auto const f = partial.f_;
+  partial.f_ = nullptr;
+  if (std::fclose(f) != 0) {
     throw std::runtime_error("write failed");
   }
-  fs::rename(tmp_path, out_path);
+  fs::rename(partial.path_, out_path);
   partial.done_ = true;
   fmt::println(stderr, "decoded {} records ({} bitmap, {} dense)", n_records,
                n_sparse, n_records - n_sparse);

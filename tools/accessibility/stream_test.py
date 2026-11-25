@@ -68,12 +68,21 @@ def main():
     r = run(tool, 'stream-decode', '--in', p2, '--out', os.path.join(tmp, 'hard.bin'))
     check('refuses a hard link to --in', r.returncode == 2 and open(p2, 'rb').read() == v2, r.stderr[-200:])
     os.remove(os.path.join(tmp, 'hard.bin'))
-    for name, bad in (('truncated', v2[:-1]), ('trailing byte', v2 + b'\0'), ('unknown tag', v2[:56 + 24 + 4] + b'\7' + v2[56 + 24 + 5:])):
+    sentinel = b'unrelated file'
+    open(out + '.partial', 'wb').write(sentinel)
+    leftovers = lambda: [f for f in os.listdir(tmp) if f.startswith('d.bin.partial-')]
+    for name, bad in (('truncated', v2[:-1]), ('trailing byte', v2 + b'\0'), ('unknown tag', v2[:56 + 24 + 4] + b'\7' + v2[56 + 24 + 5:]),
+                      ('huge destination count', header(2, 1 << 31, 1, 0) + struct.pack('<q', 0) + struct.pack('<IB', 1, 0) + b'\0' * 16),
+                      ('huge bitmap', header(2, 1 << 31, 1, 0) + struct.pack('<q', 0) + struct.pack('<IBI', 1, 1, 0) + b'\0' * 16)):
         if os.path.exists(out):
             os.remove(out)
         open(p2, 'wb').write(bad)
         r = run(tool, 'stream-decode', '--in', p2, '--out', out)
-        check('rejects %s, writes no output' % name, r.returncode == 2 and not os.path.exists(out) and not os.path.exists(out + '.partial'), r.stderr[-200:])
+        check('rejects %s, writes no output' % name, r.returncode == 2 and not os.path.exists(out) and not leftovers(), r.stderr[-200:])
+    check('leaves an existing OUT.partial untouched', open(out + '.partial', 'rb').read() == sentinel)
+    open(p2, 'wb').write(v2)
+    r = run(tool, 'stream-decode', '--in', p2, '--out', out)
+    check('decodes next to an existing OUT.partial', r.returncode == 0 and open(out, 'rb').read() == v1 and open(out + '.partial', 'rb').read() == sentinel and not leftovers(), r.stderr[-200:])
     open(p2, 'wb').write(header(2, 0, 1 << 29, 0))
     r = run(tool, 'stream-decode', '--in', p2, '--out', out)
     check('rejects a departure count larger than the file', r.returncode == 2 and not os.path.exists(out), r.stderr[-200:])

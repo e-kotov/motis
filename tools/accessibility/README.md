@@ -246,7 +246,8 @@ and `analyst/decay/*.java`, `conveyal/r5` dev `500ce263`), which `r5r` wraps.
 - **`stream_test.py TMP motis-accessibility [--data DIR]`** checks `stream-decode` against
   version-1 bytes written by an independent encoder (all eight flag combinations,
   empty, partly and fully reached records), its refusal to overwrite the input,
-  that rejected inputs leave no output, that `r5r-reduce` rejects version 2 and, with
+  that rejected inputs (including headers declaring huge records) leave no output
+  and that an existing `OUT.partial` stays untouched, that `r5r-reduce` rejects version 2 and, with
   `--data`, that `route` rejects connector minutes above 1440.
 - **Reference check:** `r5r_reference.py --stream S.bin --r5r-dir DIR ...` recomputes
   both files from a raw `--out` stream of the same run, using only the standard library.
@@ -300,9 +301,11 @@ The writer picks the bitmap form when it is smaller than the dense payload.
 Unreached cells always hold 255/65535, transfer code 255 and egress stop
 0xFFFFFFFF, so the dense record is recovered exactly. `motis-accessibility
 stream-decode --in S2.bin --out S1.bin` rewrites a version-2 stream as the
-version-1 stream (version field 1, records in the same order). It writes
-`OUT.partial` and renames it to `OUT` only after the whole input decoded, and
-refuses an `--out` that is the input file. The other readers
+version-1 stream (version field 1, records in the same order). It writes a new,
+uniquely named `OUT.partial-XXXXXX` (created exclusively, so no existing file is
+touched), renames it to `OUT` only after the whole input decoded and removes it on
+any error. It refuses an `--out` that is the input file, and it allocates record
+buffers only once the file holds the bytes a record needs. The other readers
 (`r5r-reduce`, `r5r_reference.py`, `vr-access`) accept version 1 only and reject
 version 2 with an error. `stream_encoding` and `bitmap_records` are in the timing
 JSON.
