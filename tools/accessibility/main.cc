@@ -1891,6 +1891,11 @@ int cmd_stream_decode(args const& a) {
         throw std::runtime_error(
             fmt::format("bitmap holds {} cells, count says {}", count, n));
       }
+      if (static_cast<std::uintmax_t>(n) * cell_bytes > remaining()) {
+        throw std::runtime_error(fmt::format(
+            "truncated stream: bitmap payload of origin {} needs {} bytes", o,
+            static_cast<std::uintmax_t>(n) * cell_bytes));
+      }
       payload.resize(static_cast<std::size_t>(n) * cell_bytes);
       read_exact(payload.data(), payload.size(), "bitmap payload");
       dense.resize(dense_bytes);  // cells <= 8 x bitmap bytes read

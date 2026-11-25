@@ -73,7 +73,8 @@ def main():
     leftovers = lambda: [f for f in os.listdir(tmp) if f.startswith('d.bin.partial-')]
     for name, bad in (('truncated', v2[:-1]), ('trailing byte', v2 + b'\0'), ('unknown tag', v2[:56 + 24 + 4] + b'\7' + v2[56 + 24 + 5:]),
                       ('huge destination count', header(2, 1 << 31, 1, 0) + struct.pack('<q', 0) + struct.pack('<IB', 1, 0) + b'\0' * 16),
-                      ('huge bitmap', header(2, 1 << 31, 1, 0) + struct.pack('<q', 0) + struct.pack('<IBI', 1, 1, 0) + b'\0' * 16)):
+                      ('huge bitmap', header(2, 1 << 31, 1, 0) + struct.pack('<q', 0) + struct.pack('<IBI', 1, 1, 0) + b'\0' * 16),
+                      ('missing bitmap payload', header(2, 8 * 4096, 1, 7) + struct.pack('<q', 0) + struct.pack('<IBI', 1, 1, 8 * 4096) + b'\xff' * 4096)):
         if os.path.exists(out):
             os.remove(out)
         open(p2, 'wb').write(bad)
