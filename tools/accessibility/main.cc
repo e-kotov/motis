@@ -423,9 +423,17 @@ std::vector<connector> read_connectors(fs::path const& p) {
     if (parts.size() != 3U) {
       throw std::runtime_error(fmt::format("bad connector line '{}'", line));
     }
+    auto const minutes = parse_num<std::uint16_t>(parts[2]);
+    // Durations are narrowed to Nigiri's signed 16-bit minutes and added to
+    // arrivals; above one day they could wrap negative, which no valid
+    // connector needs, so they are rejected.
+    if (minutes > kMaxCap) {
+      throw std::runtime_error(fmt::format(
+          "{}: connector minutes {} > {} in '{}'", p.string(), minutes,
+          kMaxCap, line));
+    }
     out.push_back({parse_num<std::uint32_t>(parts[0]),
-                   parse_num<std::uint32_t>(parts[1]),
-                   parse_num<std::uint16_t>(parts[2])});
+                   parse_num<std::uint32_t>(parts[1]), minutes});
   }
   return out;
 }
@@ -1763,7 +1771,15 @@ int cmd_stream_decode(args const& a) {
   if (flags & ~7U) {
     throw std::runtime_error(fmt::format("unknown stream flags {}", flags));
   }
-  auto deps = std::vector<char>(8U * n_deps);
+  if (n_deps == 0U) {
+    throw std::runtime_error("stream n_departures must be at least 1");
+  }
+  auto const in_size = fs::file_size(in_path);
+  if (std::size_t{8U} * n_deps > in_size) {
+    throw std::runtime_error(fmt::format(
+        "stream declares {} departures but has {} bytes", n_deps, in_size));
+  }
+  auto deps = std::vector<char>(std::size_t{8U} * n_deps);
   read_exact(deps.data(), deps.size(), "departures");
   auto const cells = static_cast<std::size_t>(n_deps) * n_dests;
   auto const tt_size = (flags & 4U) ? 2U : 1U;
@@ -1773,7 +1789,30 @@ int cmd_stream_decode(args const& a) {
   auto const dense_bytes = cells * cell_bytes;
   auto const bitmap_bytes = (cells + 7U) / 8U;
 
-  auto out = std::ofstream{out_path, std::ios::binary};
+  // Never write into the input (same path, symlink or hard link), and
+  // publish the output only after the whole input decoded.
+  auto const tmp_path = fs::path{out_path.string() + ".partial"};
+  for (auto const& p : {out_path, tmp_path}) {
+    if (fs::exists(p) && fs::equivalent(in_path, p)) {
+      throw std::runtime_error(fmt::format(
+          "stream-decode: {} is the input stream", p.string()));
+    }
+  }
+  struct remove_partial {
+    ~remove_partial() {
+      if (!done_) {
+        auto ec = std::error_code{};
+        fs::remove(path_, ec);
+      }
+    }
+    fs::path path_;
+    bool done_{false};
+  } partial{tmp_path};
+  auto out = std::ofstream{tmp_path, std::ios::binary | std::ios::trunc};
+  if (!out) {
+    throw std::runtime_error(
+        fmt::format("cannot open {}", tmp_path.string()));
+  }
   auto const v1 = kFormatVersion;
   std::memcpy(hdr.data() + 8, &v1, 4);
   out.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
@@ -1853,6 +1892,8 @@ int cmd_stream_decode(args const& a) {
   if (!out) {
     throw std::runtime_error("write failed");
   }
+  fs::rename(tmp_path, out_path);
+  partial.done_ = true;
   fmt::println(stderr, "decoded {} records ({} bitmap, {} dense)", n_records,
                n_sparse, n_records - n_sparse);
   return 0;
@@ -2009,7 +2050,8 @@ struct egress_stats_t {
   }
 };
 
-// --row-digest: per record, wyhash (cista::hash) chained over the bytes a
+// --row-digest: per record, cista::hash (FNV-1a 64 unless cista is built with
+// wyhash or XXH3) chained over the bytes a
 // version-1 stream record holds (u32 origin, travel times, then the optional
 // transfers and egress-stop blocks). Records are combined by a wrapping sum
 // and an xor, so the digest does not depend on thread completion order.
@@ -2304,7 +2346,8 @@ int cmd_route(args const& a) {
   a.check_all_used();
   auto const conn_ms = ms_since(t_conn);
   auto n_egress_stops = std::uint64_t{0U};
-  for (auto s = std::size_t{0U}; s + 1U < egress.begin_.size(); ++s) {
+  for (auto s = std::size_t{0U};
+       egress_stats && s + 1U < egress.begin_.size(); ++s) {
     n_egress_stops += egress.begin_[s] != egress.begin_[s + 1U] ? 1U : 0U;
   }
   for (auto const v : access.value_) {

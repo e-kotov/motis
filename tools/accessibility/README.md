@@ -144,6 +144,8 @@ Bounds and modes:
 - `--max-transfers` must be in **[0, 14]**, Nigiri's `kMaxTransfers`. Values outside
   the range are rejected before narrowing.
 - `--max-travel-minutes` must be in **[0, 1440]**.
+- Connector minutes (access, egress, direct files) must be in **[0, 1440]**; larger
+  values would wrap when narrowed to Nigiri's signed minutes and are rejected.
 - `--discard` computes everything and writes no records. It is for timing only.
 - `--egress-stats` adds an `egress_stats` object to the timing JSON. It counts,
   summed over queries: stops with egress connectors, those reached (a valid
@@ -153,8 +155,9 @@ Bounds and modes:
   plus reached cells, and as the smaller of the two; `reached_decile[i]` counts
   rows whose reached fraction lies in [i/10, (i+1)/10). Outputs are unchanged;
   without the flag the egress loop carries no counters.
-- `--row-digest` adds `row_digest` to the timing JSON: per record, wyhash
-  (`cista::hash`) chained over the bytes the stream record holds (origin, travel
+- `--row-digest` adds `row_digest` to the timing JSON: per record, `cista::hash`
+  (64-bit FNV-1a in the default cista build, wyhash or XXH3 if cista is built with
+  them) chained over the bytes the stream record holds (origin, travel
   times, optional transfers and egress-stop blocks), combined over records by a
   wrapping 64-bit sum and an xor. It does not depend on thread order and also
   works with `--discard`, so two builds can be checked for identical rows without
@@ -240,6 +243,11 @@ and `analyst/decay/*.java`, `conveyal/r5` dev `500ce263`), which `r5r` wraps.
   stream: rejected percentile lists, an omitted or empty `--cutoffs` with
   `--opportunities`, a stream missing its final byte, and a stream with a trailing
   byte, plus, with the binary, `r5r-reduce` against the reference.
+- **`stream_test.py TMP motis-accessibility [--data DIR]`** checks `stream-decode` against
+  version-1 bytes written by an independent encoder (all eight flag combinations,
+  empty, partly and fully reached records), its refusal to overwrite the input,
+  that rejected inputs leave no output, that `r5r-reduce` rejects version 2 and, with
+  `--data`, that `route` rejects connector minutes above 1440.
 - **Reference check:** `r5r_reference.py --stream S.bin --r5r-dir DIR ...` recomputes
   both files from a raw `--out` stream of the same run, using only the standard library.
 
@@ -292,7 +300,9 @@ The writer picks the bitmap form when it is smaller than the dense payload.
 Unreached cells always hold 255/65535, transfer code 255 and egress stop
 0xFFFFFFFF, so the dense record is recovered exactly. `motis-accessibility
 stream-decode --in S2.bin --out S1.bin` rewrites a version-2 stream as the
-version-1 stream (version field 1, records in the same order). The other readers
+version-1 stream (version field 1, records in the same order). It writes
+`OUT.partial` and renames it to `OUT` only after the whole input decoded, and
+refuses an `--out` that is the input file. The other readers
 (`r5r-reduce`, `r5r_reference.py`, `vr-access`) accept version 1 only and reject
 version 2 with an error. `stream_encoding` and `bitmap_records` are in the timing
 JSON.
