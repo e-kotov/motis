@@ -460,6 +460,28 @@ struct csr {
     }
     return r;
   }
+
+  // Orders each key's entries by (minutes, value). Within one key the order
+  // of entries does not change any result of the egress loop: all entries of
+  // a stop share its arrival and transfer count, so each destination keeps
+  // the minimum over that stop's entries either way. Sorted entries let the
+  // loop stop at the first one beyond the travel-time cap.
+  void sort_by_minutes() {
+    auto tmp = std::vector<std::pair<std::uint16_t, std::uint32_t>>{};
+    for (auto k = std::size_t{0U}; k + 1U < begin_.size(); ++k) {
+      auto const b = begin_[k];
+      auto const e = begin_[k + 1U];
+      tmp.clear();
+      for (auto j = b; j != e; ++j) {
+        tmp.emplace_back(minutes_[j], value_[j]);
+      }
+      std::sort(begin(tmp), end(tmp));
+      for (auto j = b; j != e; ++j) {
+        minutes_[j] = tmp[j - b].first;
+        value_[j] = tmp[j - b].second;
+      }
+    }
+  }
 };
 
 // ---------------------------------------------------------------- data
@@ -2058,6 +2080,7 @@ int cmd_route(args const& a) {
   if (!target_stops) {
     egress =
         csr::build(read_connectors(a.str("egress")), tt.n_locations(), true);
+    egress.sort_by_minutes();  // the egress loop stops at the cap
     if (a.has("direct")) {
       direct = csr::build(read_connectors(a.str("direct")), n_origins, false);
     } else {
@@ -2277,15 +2300,17 @@ int cmd_route(args const& a) {
               ++st.stops_reached_;
               st.links_total_ += egress.begin_[s + 1U] - egress.begin_[s];
             }
+            auto const transfers =
+                best_k == 0U ? kWalkViaStop
+                             : static_cast<std::uint8_t>(best_k - 1U);
+            // Entries are sorted by minutes: the first one beyond the cap
+            // ends this stop (exactly the entries the cap check skipped).
             for (auto j = egress.begin_[s]; j != egress.begin_[s + 1U]; ++j) {
-              auto const d = egress.value_[j];
               auto const total = best + egress.minutes_[j];
-              auto const transfers =
-                  best_k == 0U ? kWalkViaStop
-                               : static_cast<std::uint8_t>(best_k - 1U);
               if (total > max_travel) {
-                continue;
+                break;
               }
+              auto const d = egress.value_[j];
               if constexpr (kStats) {
                 ++st.links_within_cap_;
               }

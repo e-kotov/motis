@@ -129,6 +129,11 @@ Per origin and departure:
     are unreachable; CAP itself is inclusive.
   - This is the stock `/api/experimental/one-to-many-intermodal` rule, except that
     stock does not cap transit totals.
+  - Each stop's egress connectors are sorted by (minutes, destination) when they
+    are loaded. The egress loop stops at a stop's first connector whose total
+    exceeds CAP, so connectors that cannot count are never visited. Within one stop
+    every connector shares the stop's arrival and transfer count, so the order does
+    not change any value, transfer code or egress stop.
 - **Stops** (`--target stops`): the fastest arrival at every location, including
   round 0, as in stock `/api/v6/one-to-all`. Here the transfers block holds **k**,
   the number of vehicles used (0 = start or walk only), not k − 1.
