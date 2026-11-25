@@ -465,25 +465,40 @@ struct csr {
     return r;
   }
 
-  // Orders each key's entries by (minutes, value). Within one key the order
-  // of entries does not change any result of the egress loop: all entries of
-  // a stop share its arrival and transfer count, so each destination keeps
-  // the minimum over that stop's entries either way. Sorted entries let the
-  // loop stop at the first one beyond the travel-time cap.
+  // Orders each key's entries by minutes, keeping their previous order within
+  // one minute (a stable counting sort, linear in the entries). Within one key
+  // the order of entries does not change any result of the egress loop: all
+  // entries of a stop share its arrival and transfer count, so each
+  // destination keeps the minimum over that stop's entries either way. Sorted
+  // entries let the loop stop at the first one beyond the travel-time cap.
   void sort_by_minutes() {
-    auto tmp = std::vector<std::pair<std::uint16_t, std::uint32_t>>{};
+    auto count = std::vector<std::uint32_t>{};
+    auto tmp_v = std::vector<std::uint32_t>{};
+    auto tmp_m = std::vector<std::uint16_t>{};
     for (auto k = std::size_t{0U}; k + 1U < begin_.size(); ++k) {
       auto const b = begin_[k];
       auto const e = begin_[k + 1U];
-      tmp.clear();
-      for (auto j = b; j != e; ++j) {
-        tmp.emplace_back(minutes_[j], value_[j]);
+      if (std::is_sorted(begin(minutes_) + b, begin(minutes_) + e)) {
+        continue;
       }
-      std::sort(begin(tmp), end(tmp));
+      auto const max_m = *std::max_element(begin(minutes_) + b,
+                                           begin(minutes_) + e);
+      count.assign(static_cast<std::size_t>(max_m) + 2U, 0U);
       for (auto j = b; j != e; ++j) {
-        minutes_[j] = tmp[j - b].first;
-        value_[j] = tmp[j - b].second;
+        ++count[minutes_[j] + 1U];
       }
+      for (auto m = std::size_t{1U}; m < count.size(); ++m) {
+        count[m] += count[m - 1U];
+      }
+      tmp_v.resize(e - b);
+      tmp_m.resize(e - b);
+      for (auto j = b; j != e; ++j) {
+        auto const pos = count[minutes_[j]]++;
+        tmp_v[pos] = value_[j];
+        tmp_m[pos] = minutes_[j];
+      }
+      std::copy(begin(tmp_v), end(tmp_v), begin(value_) + b);
+      std::copy(begin(tmp_m), end(tmp_m), begin(minutes_) + b);
     }
   }
 };
