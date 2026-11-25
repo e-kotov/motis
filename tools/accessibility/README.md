@@ -20,13 +20,14 @@ motis-accessibility connectors --data DIR (--points cells.csv | --stop-points st
                                --max-seconds S [--pedestrian-speed M/S] [--max-matching-distance M] [--threads T] --out C.csv
 motis-accessibility direct     --data DIR --origins cells.csv --dests cells.csv --max-seconds S --radius-m R \
                                [--pedestrian-speed M/S] [--threads T] --out D.csv
+motis-accessibility stream-decode --in sparse.bin --out dense.bin
 motis-accessibility export-tt  --data DIR --from-unix-minutes A --to-unix-minutes B [--format csv|bin] --out DIR
 motis-accessibility route      --data DIR --n-origins N [--n-dests M] --access A.csv [--egress E.csv] [--direct D.csv] \
                                --dep-start-unix-minutes T0 [--dep-count C] [--dep-step-minutes S] --max-travel-minutes CAP \
                                [--max-transfers 0..14] [--target dests|stops] [--egress-rounds transit|all] \
                                [--origin-from I --origin-to J | --origin-list I,J,..] [--with-transfers] [--with-egress-stop] \
                                [--threads T] [--pin-threads] [--reuse-state] [--range] [--discard] [--out stream.bin] [--timing-json t.json] \
-                               [--egress-stats] [--row-digest] \
+                               [--egress-stats] [--row-digest] [--stream-encoding dense|sparse] \
                                [--r5r-out DIR [--percentiles P,..] [--opportunities cells.csv --opportunity-columns C,.. \
                                 --cutoffs MIN,.. [--decay step|linear:W|exponential|fixed-exponential:K|logistic:SD]]]
 ```
@@ -269,6 +270,32 @@ come in any order. Each record is:
 - optional `u32` egress_stop `[dep][dest]`: 0xFFFFFFFF = none
 
 The payload is arrival times only. **No journeys are reconstructed.**
+
+### Sparse records (`--stream-encoding sparse`, version 2)
+
+The default (`dense`) writes version 1 as above. `--stream-encoding sparse` writes
+the same header with **version 2** and the same departures. Each record is then:
+
+- `u32` origin
+- `u8` encoding: 0 = dense, 1 = bitmap
+- dense: the version-1 record payload, unchanged (travel times, then the optional
+  transfer and egress-stop blocks)
+- bitmap, over the record's C = n_departures × n_dests cells in `[dep][dest]` order:
+  - `u32` R, the number of reached cells (travel time not unreachable)
+  - presence bitmap, ⌈C / 8⌉ bytes: cell i is bit (i mod 8) of byte ⌊i / 8⌋ (least
+    significant bit first); padding bits are 0
+  - travel times of the R reached cells in cell order (`u8`, or `u16` with flag bit 2)
+  - with flag bit 0: their `u8` transfer codes; with flag bit 1: their `u32` egress
+    stops
+
+The writer picks the bitmap form when it is smaller than the dense payload.
+Unreached cells always hold 255/65535, transfer code 255 and egress stop
+0xFFFFFFFF, so the dense record is recovered exactly. `motis-accessibility
+stream-decode --in S2.bin --out S1.bin` rewrites a version-2 stream as the
+version-1 stream (version field 1, records in the same order). The other readers
+(`r5r-reduce`, `r5r_reference.py`, `vr-access`) accept version 1 only and reject
+version 2 with an error. `stream_encoding` and `bitmap_records` are in the timing
+JSON.
 
 ## `vr-access`
 

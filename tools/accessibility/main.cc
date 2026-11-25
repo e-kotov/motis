@@ -76,6 +76,10 @@ namespace n = nigiri;
 namespace {
 
 constexpr auto kFormatVersion = std::uint32_t{1U};
+// --stream-encoding sparse: version 2, per record a dense or a bitmap payload.
+constexpr auto kSparseFormatVersion = std::uint32_t{2U};
+constexpr auto kRecordDense = std::uint8_t{0U};
+constexpr auto kRecordBitmap = std::uint8_t{1U};
 constexpr auto kUnreachable = std::uint8_t{255U};
 constexpr auto kUnreachable16 = std::uint16_t{0xFFFFU};
 constexpr auto kMaxCap = 1440U;  // u16 path; one day
@@ -1635,8 +1639,11 @@ int cmd_r5r_reduce(args const& a) {
   auto reserved = std::array<char, 20>{};
   read_exact(reserved.data(), reserved.size(), "header");
   if (hdr[0] != 1U) {
-    throw std::runtime_error(
-        fmt::format("unsupported stream version {}", hdr[0]));
+    throw std::runtime_error(fmt::format(
+        "unsupported stream version {}{}", hdr[0],
+        hdr[0] == kSparseFormatVersion
+            ? " (sparse; convert it with `stream-decode` first)"
+            : ""));
   }
   auto const n_dests = hdr[2];
   auto const n_deps = hdr[3];
@@ -1700,6 +1707,139 @@ int cmd_r5r_reduce(args const& a) {
     read_origins(std::uint8_t{});
   }
   out.close();
+  return 0;
+}
+
+// `stream-decode --in S2.bin --out S1.bin`: rewrites a version-2 (sparse)
+// stream as the version-1 stream the same run writes with the default
+// encoding: same header (version 1), departures and records in file order.
+int cmd_stream_decode(args const& a) {
+  auto const in_path = fs::path{a.str("in")};
+  auto const out_path = fs::path{a.str("out")};
+  a.check_all_used();
+  auto in = std::ifstream{in_path, std::ios::binary};
+  if (!in) {
+    throw std::runtime_error(fmt::format("cannot open {}", in_path.string()));
+  }
+  auto const read_exact = [&](void* dst, std::size_t const n,
+                              std::string_view const what) {
+    in.read(static_cast<char*>(dst), static_cast<std::streamsize>(n));
+    if (static_cast<std::size_t>(in.gcount()) != n) {
+      throw std::runtime_error(fmt::format(
+          "truncated stream: {} ({} of {} bytes)", what, in.gcount(), n));
+    }
+  };
+  auto hdr = std::array<char, 56>{};
+  read_exact(hdr.data(), hdr.size(), "header");
+  if (std::string_view{hdr.data(), 8} != "VRTTMATX") {
+    throw std::runtime_error("not a route stream");
+  }
+  auto version = std::uint32_t{};
+  auto n_dests = std::uint32_t{};
+  auto n_deps = std::uint32_t{};
+  std::memcpy(&version, hdr.data() + 8, 4);
+  std::memcpy(&n_dests, hdr.data() + 16, 4);
+  std::memcpy(&n_deps, hdr.data() + 20, 4);
+  auto const flags = static_cast<std::uint8_t>(hdr[34]);
+  if (version != kSparseFormatVersion) {
+    throw std::runtime_error(
+        fmt::format("stream-decode expects version 2, got {}", version));
+  }
+  if (flags & ~7U) {
+    throw std::runtime_error(fmt::format("unknown stream flags {}", flags));
+  }
+  auto deps = std::vector<char>(8U * n_deps);
+  read_exact(deps.data(), deps.size(), "departures");
+  auto const cells = static_cast<std::size_t>(n_deps) * n_dests;
+  auto const tt_size = (flags & 4U) ? 2U : 1U;
+  auto const has_tr = (flags & 1U) != 0U;
+  auto const has_via = (flags & 2U) != 0U;
+  auto const cell_bytes = tt_size + (has_tr ? 1U : 0U) + (has_via ? 4U : 0U);
+  auto const dense_bytes = cells * cell_bytes;
+  auto const bitmap_bytes = (cells + 7U) / 8U;
+
+  auto out = std::ofstream{out_path, std::ios::binary};
+  auto const v1 = kFormatVersion;
+  std::memcpy(hdr.data() + 8, &v1, 4);
+  out.write(hdr.data(), static_cast<std::streamsize>(hdr.size()));
+  out.write(deps.data(), static_cast<std::streamsize>(deps.size()));
+
+  auto dense = std::vector<char>(dense_bytes);
+  auto bitmap = std::vector<std::uint8_t>(bitmap_bytes);
+  auto payload = std::vector<char>{};
+  auto seen = std::unordered_set<std::uint32_t>{};
+  auto n_records = std::uint64_t{0U};
+  auto n_sparse = std::uint64_t{0U};
+  while (true) {
+    auto o = std::uint32_t{};
+    in.read(reinterpret_cast<char*>(&o), sizeof(o));
+    if (in.gcount() == 0 && in.eof()) {
+      break;
+    }
+    if (in.gcount() != sizeof(o)) {
+      throw std::runtime_error("truncated stream: incomplete origin id");
+    }
+    if (!seen.insert(o).second) {
+      throw std::runtime_error(
+          fmt::format("duplicate stream record for origin {}", o));
+    }
+    auto tag = std::uint8_t{};
+    read_exact(&tag, 1U, "record encoding");
+    if (tag == kRecordDense) {
+      read_exact(dense.data(), dense.size(), "dense record");
+    } else if (tag == kRecordBitmap) {
+      ++n_sparse;
+      auto n = std::uint32_t{};
+      read_exact(&n, 4U, "reached count");
+      read_exact(bitmap.data(), bitmap.size(), "bitmap");
+      auto count = std::size_t{0U};
+      for (auto i = std::size_t{0U}; i != cells; ++i) {
+        count += (bitmap[i / 8U] >> (i % 8U)) & 1U;
+      }
+      if (cells % 8U != 0U && (bitmap.back() >> (cells % 8U)) != 0U) {
+        throw std::runtime_error("bitmap padding bits set");
+      }
+      if (count != n) {
+        throw std::runtime_error(
+            fmt::format("bitmap holds {} cells, count says {}", count, n));
+      }
+      payload.resize(static_cast<std::size_t>(n) * cell_bytes);
+      read_exact(payload.data(), payload.size(), "bitmap payload");
+      auto* d_tt = dense.data();
+      auto* d_tr = d_tt + cells * tt_size;
+      auto* d_via = d_tr + (has_tr ? cells : 0U);
+      std::memset(d_tt, 0xFF, dense.size());  // unreachable / 255 / no stop
+      auto const* p_tt = payload.data();
+      auto const* p_tr = p_tt + static_cast<std::size_t>(n) * tt_size;
+      auto const* p_via = p_tr + (has_tr ? n : 0U);
+      auto r = std::size_t{0U};
+      for (auto i = std::size_t{0U}; i != cells; ++i) {
+        if (((bitmap[i / 8U] >> (i % 8U)) & 1U) == 0U) {
+          continue;
+        }
+        std::memcpy(d_tt + i * tt_size, p_tt + r * tt_size, tt_size);
+        if (has_tr) {
+          d_tr[i] = p_tr[r];
+        }
+        if (has_via) {
+          std::memcpy(d_via + i * 4U, p_via + r * 4U, 4U);
+        }
+        ++r;
+      }
+    } else {
+      throw std::runtime_error(
+          fmt::format("unknown record encoding {} for origin {}", tag, o));
+    }
+    out.write(reinterpret_cast<char const*>(&o), sizeof(o));
+    out.write(dense.data(), static_cast<std::streamsize>(dense.size()));
+    ++n_records;
+  }
+  out.close();
+  if (!out) {
+    throw std::runtime_error("write failed");
+  }
+  fmt::println(stderr, "decoded {} records ({} bitmap, {} dense)", n_records,
+               n_sparse, n_records - n_sparse);
   return 0;
 }
 
@@ -1894,6 +2034,57 @@ struct row_digest_t {
   }
 };
 
+// Version-2 record payload choice. A record covers n_departures x n_dests
+// cells in [dep][dest] order. The bitmap payload is: u32 reached count, a
+// presence bitmap of ceil(cells / 8) bytes (cell i is bit i % 8 of byte i / 8,
+// set iff its travel time is not unreachable; padding bits zero), then the
+// travel times of the reached cells in cell order, then their transfer codes
+// and egress stops if the stream carries those blocks. Unreached cells always
+// hold unreachable / 255 / 0xFFFFFFFF, so the dense record is recovered
+// exactly. Returns true and fills `enc` when the bitmap payload is smaller.
+template <typename T>
+bool encode_bitmap(std::vector<T> const& tt,
+                   std::vector<std::uint8_t> const& tr,
+                   std::vector<std::uint32_t> const& via,
+                   T const unreachable,
+                   std::vector<char>& enc) {
+  auto const cells = tt.size();
+  auto reached = std::size_t{0U};
+  for (auto const v : tt) {
+    reached += v != unreachable ? 1U : 0U;
+  }
+  auto const cell_bytes =
+      sizeof(T) + (tr.empty() ? 0U : 1U) + (via.empty() ? 0U : 4U);
+  auto const bitmap_bytes = (cells + 7U) / 8U;
+  auto const sparse = 4U + bitmap_bytes + reached * cell_bytes;
+  if (sparse >= cells * cell_bytes || reached > 0xFFFFFFFFU) {
+    return false;
+  }
+  enc.assign(sparse, char{0});
+  auto const n = static_cast<std::uint32_t>(reached);
+  std::memcpy(enc.data(), &n, 4U);
+  auto* bits = reinterpret_cast<std::uint8_t*>(enc.data() + 4U);
+  auto* vals = enc.data() + 4U + bitmap_bytes;
+  auto* trs = vals + reached * sizeof(T);
+  auto* vias = trs + (tr.empty() ? 0U : reached);
+  auto r = std::size_t{0U};
+  for (auto i = std::size_t{0U}; i != cells; ++i) {
+    if (tt[i] == unreachable) {
+      continue;
+    }
+    bits[i / 8U] |= static_cast<std::uint8_t>(1U << (i % 8U));
+    std::memcpy(vals + r * sizeof(T), &tt[i], sizeof(T));
+    if (!tr.empty()) {
+      trs[r] = static_cast<char>(tr[i]);
+    }
+    if (!via.empty()) {
+      std::memcpy(vias + r * 4U, &via[i], 4U);
+    }
+    ++r;
+  }
+  return true;
+}
+
 struct stream_header {
   char magic_[8]{'V', 'R', 'T', 'T', 'M', 'A', 'T', 'X'};
   std::uint32_t version_{kFormatVersion};
@@ -2044,6 +2235,14 @@ int cmd_route(args const& a) {
   // a stream would hold, also with --discard.
   auto const egress_stats = a.has("egress-stats");
   auto const row_digest = a.has("row-digest");
+  // --stream-encoding dense (default): version-1 stream. sparse: version 2,
+  // each record dense or bitmap-encoded, whichever is smaller (see
+  // encode_bitmap); `stream-decode` turns it back into the version-1 stream.
+  auto const stream_encoding = a.str("stream-encoding", "dense");
+  if (stream_encoding != "dense" && stream_encoding != "sparse") {
+    throw std::runtime_error("--stream-encoding must be dense|sparse");
+  }
+  auto const sparse_stream = stream_encoding == "sparse";
 
   // r5r-style outputs (--r5r-out DIR): per origin, over the departures of the
   // window, percentiles of travel time to each destination (ttm.bin) and, with
@@ -2127,6 +2326,7 @@ int cmd_route(args const& a) {
   h.flags_ = static_cast<std::uint8_t>((with_transfers ? 1U : 0U) |
                                        (with_via ? 2U : 0U) | (tt16 ? 4U : 0U));
   h.target_ = target_stops ? 1U : 0U;
+  h.version_ = sparse_stream ? kSparseFormatVersion : kFormatVersion;
   out.write(reinterpret_cast<char const*>(&h), sizeof(h));
   for (auto i = 0U; i != dep_count; ++i) {
     auto const t = static_cast<std::int64_t>(dep_start + i * dep_step);
@@ -2144,6 +2344,7 @@ int cmd_route(args const& a) {
   auto reuse_finish_ns = std::atomic_uint64_t{0U};
   auto init_ns = std::atomic_uint64_t{0U};
   auto digest_ns = std::atomic_uint64_t{0U};
+  auto bitmap_records = std::atomic_uint64_t{0U};
   auto stats_mutex = std::mutex{};
   auto stats = egress_stats_t{};
   auto digest = row_digest_t{};
@@ -2173,6 +2374,8 @@ int cmd_route(args const& a) {
     auto dg = row_digest_t{};
     auto my_init_ns = std::uint64_t{0U};
     auto my_digest_ns = std::uint64_t{0U};
+    auto enc = std::vector<char>{};
+    auto my_bitmap_records = std::uint64_t{0U};
     for (auto oi = next++; oi < origin_list.size(); oi = next++) {
       auto const o = origin_list[oi];
       auto const ti = clock_t_::now();
@@ -2357,17 +2560,29 @@ int cmd_route(args const& a) {
         r5r->origin(o, tt_buf.data(), kUnreachableT);
       }
       if (!discard && write_stream) {
+        auto const bitmap =
+            sparse_stream &&
+            encode_bitmap(tt_buf, tr_buf, via_buf, kUnreachableT, enc);
         auto const lock = std::lock_guard{write_mutex};
         out.write(reinterpret_cast<char const*>(&o), sizeof(o));
-        out.write(reinterpret_cast<char const*>(tt_buf.data()),
-                  static_cast<std::streamsize>(tt_buf.size() * sizeof(tt_t)));
-        if (with_transfers) {
-          out.write(reinterpret_cast<char const*>(tr_buf.data()),
-                    static_cast<std::streamsize>(tr_buf.size()));
+        if (sparse_stream) {
+          auto const tag = bitmap ? kRecordBitmap : kRecordDense;
+          out.write(reinterpret_cast<char const*>(&tag), 1U);
         }
-        if (with_via) {
-          out.write(reinterpret_cast<char const*>(via_buf.data()),
-                    static_cast<std::streamsize>(via_buf.size() * 4U));
+        if (bitmap) {
+          out.write(enc.data(), static_cast<std::streamsize>(enc.size()));
+          ++my_bitmap_records;
+        } else {
+          out.write(reinterpret_cast<char const*>(tt_buf.data()),
+                    static_cast<std::streamsize>(tt_buf.size() * sizeof(tt_t)));
+          if (with_transfers) {
+            out.write(reinterpret_cast<char const*>(tr_buf.data()),
+                      static_cast<std::streamsize>(tr_buf.size()));
+          }
+          if (with_via) {
+            out.write(reinterpret_cast<char const*>(via_buf.data()),
+                      static_cast<std::streamsize>(via_buf.size() * 4U));
+          }
         }
       }
       write_ns += static_cast<std::uint64_t>(
@@ -2380,6 +2595,7 @@ int cmd_route(args const& a) {
     reuse_finish_ns += rctx.finish_ns_;
     init_ns += my_init_ns;
     digest_ns += my_digest_ns;
+    bitmap_records += my_bitmap_records;
     auto const lock = std::lock_guard{stats_mutex};
     stats.merge(st);
     digest.merge(dg);
@@ -2433,15 +2649,17 @@ int cmd_route(args const& a) {
       "reusable_one_to_all\":{},"
       "\"pin_threads\":{},\"allowed_cpus\":\"{}\",\"range\":{},"
       "\"reuse_init_thread_ms\":{:.3f},\"reuse_scan_thread_ms\":{:.3f},\"reuse_"
-      "finish_thread_ms\":{:.3f},\"row_init_thread_ms\":{:.3f}{}{}}}",
-      kFormatVersion, target_stops ? "stops" : "dests", egress_rounds,
+      "finish_thread_ms\":{:.3f},\"row_init_thread_ms\":{:.3f},"
+      "\"stream_encoding\":\"{}\",\"bitmap_records\":{}{}{}}}",
+      h.version_, target_stops ? "stops" : "dests", egress_rounds,
       origin_from, origin_to, n_dests, dep_count, n_threads, discard,
       max_travel, static_cast<int>(max_transfers), n_queries.load(), l.load_ms_,
       conn_ms, route_ms, kernel_ns.load() / 1e6, reduce_ns.load() / 1e6,
       write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations(), reuse_state,
       kHasReusableOneToAll<n::timetable>, pin_threads, fmt::join(cpus, " "),
       range, reuse_init_ns.load() / 1e6, reuse_scan_ns.load() / 1e6,
-      reuse_finish_ns.load() / 1e6, init_ns.load() / 1e6,
+      reuse_finish_ns.load() / 1e6, init_ns.load() / 1e6, stream_encoding,
+      bitmap_records.load(),
       row_digest ? fmt::format(",\"row_digest\":{{\"sum\":\"{:016x}\","
                                "\"xor\":\"{:016x}\",\"records\":{},"
                                "\"thread_ms\":{:.3f}}}",
@@ -2483,6 +2701,8 @@ int main(int ac, char** av) {
       return cmd_r5r_reduce(a);
     } else if (cmd == "r5r-selftest") {
       return cmd_r5r_selftest(a);
+    } else if (cmd == "stream-decode") {
+      return cmd_stream_decode(a);
     }
     fmt::println(stderr, "unknown command {}", cmd);
     return 1;
