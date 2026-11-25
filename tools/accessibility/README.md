@@ -26,6 +26,7 @@ motis-accessibility route      --data DIR --n-origins N [--n-dests M] --access A
                                [--max-transfers 0..14] [--target dests|stops] [--egress-rounds transit|all] \
                                [--origin-from I --origin-to J | --origin-list I,J,..] [--with-transfers] [--with-egress-stop] \
                                [--threads T] [--pin-threads] [--reuse-state] [--range] [--discard] [--out stream.bin] [--timing-json t.json] \
+                               [--egress-stats] [--row-digest] \
                                [--r5r-out DIR [--percentiles P,..] [--opportunities cells.csv --opportunity-columns C,.. \
                                 --cutoffs MIN,.. [--decay step|linear:W|exponential|fixed-exponential:K|logistic:SD]]]
 ```
@@ -138,6 +139,22 @@ Bounds and modes:
   the range are rejected before narrowing.
 - `--max-travel-minutes` must be in **[0, 1440]**.
 - `--discard` computes everything and writes no records. It is for timing only.
+- `--egress-stats` adds an `egress_stats` object to the timing JSON. It counts,
+  summed over queries: stops with egress connectors, those reached (a valid
+  arrival in an admitted round), their egress links, the links within the cap and
+  the links that improved a destination. Per finished row (one departure of one
+  origin) it counts reached cells and sizes the row dense, as a presence bitmap
+  plus reached cells, and as the smaller of the two; `reached_decile[i]` counts
+  rows whose reached fraction lies in [i/10, (i+1)/10). Outputs are unchanged;
+  without the flag the egress loop carries no counters.
+- `--row-digest` adds `row_digest` to the timing JSON: per record, wyhash
+  (`cista::hash`) chained over the bytes the stream record holds (origin, travel
+  times, optional transfers and egress-stop blocks), combined over records by a
+  wrapping 64-bit sum and an xor. It does not depend on thread order and also
+  works with `--discard`, so two builds can be checked for identical rows without
+  writing the stream.
+- `row_init_thread_ms` in the timing JSON is the time spent resetting the row
+  buffers, summed over threads.
 - `--reuse-state` keeps one Nigiri `raptor_state` per worker thread instead of a
   fresh one per query; every query still starts from a reset state, so outputs are
   unchanged. With a Nigiri that provides `one_to_all(tt, rtt, q, raptor_state&)` the

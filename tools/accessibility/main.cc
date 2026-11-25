@@ -7,6 +7,7 @@
 // (see tools/accessibility/README.md for the format and semantics).
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <bit>
 #include <charconv>
@@ -29,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -38,6 +40,8 @@
 
 #include "fmt/core.h"
 #include "fmt/ranges.h"
+
+#include "cista/hash.h"
 
 #include "utl/init_from.h"
 
@@ -1756,6 +1760,118 @@ void range_step(n::timetable const& tt,
 }
 
 // ---------------------------------------------------------------- route
+// --egress-stats: work counters of the destination egress loop and the
+// occupancy of the finished rows (one row = one departure of one origin).
+// `bitmap_bytes` sizes a row as a presence bitmap (ceil(n_dests / 8) bytes)
+// plus the stream's per-cell bytes for reached cells only; `best_bytes` takes
+// the smaller of that and the dense row, row by row.
+struct egress_stats_t {
+  std::uint64_t stops_with_egress_{};  // summed over queries
+  std::uint64_t stops_reached_{};  // stops with egress and a valid arrival
+  std::uint64_t links_total_{};  // egress links of the reached stops
+  std::uint64_t links_within_cap_{};
+  std::uint64_t links_improved_{};
+  std::uint64_t rows_{};
+  std::uint64_t reached_cells_{};
+  std::uint64_t dense_bytes_{};
+  std::uint64_t bitmap_bytes_{};
+  std::uint64_t best_bytes_{};
+  std::array<std::uint64_t, 11> reached_decile_{};  // floor(10 * fraction)
+
+  template <typename T>
+  void add_rows(T const* tt,
+                std::uint32_t const n_rows,
+                std::uint32_t const n_dests,
+                T const unreachable,
+                bool const with_transfers,
+                bool const with_via) {
+    auto const cell = sizeof(T) + (with_transfers ? 1U : 0U) +
+                      (with_via ? 4U : 0U);
+    for (auto r = 0U; r != n_rows; ++r) {
+      auto const* row = tt + static_cast<std::size_t>(r) * n_dests;
+      auto reached = std::uint64_t{0U};
+      for (auto d = 0U; d != n_dests; ++d) {
+        reached += row[d] != unreachable ? 1U : 0U;
+      }
+      auto const dense = std::uint64_t{n_dests} * cell;
+      auto const bitmap = (std::uint64_t{n_dests} + 7U) / 8U + reached * cell;
+      ++rows_;
+      reached_cells_ += reached;
+      dense_bytes_ += dense;
+      bitmap_bytes_ += bitmap;
+      best_bytes_ += std::min(dense, bitmap);
+      ++reached_decile_[n_dests == 0U ? 0U : (10U * reached) / n_dests];
+    }
+  }
+
+  void merge(egress_stats_t const& o) {
+    stops_with_egress_ += o.stops_with_egress_;
+    stops_reached_ += o.stops_reached_;
+    links_total_ += o.links_total_;
+    links_within_cap_ += o.links_within_cap_;
+    links_improved_ += o.links_improved_;
+    rows_ += o.rows_;
+    reached_cells_ += o.reached_cells_;
+    dense_bytes_ += o.dense_bytes_;
+    bitmap_bytes_ += o.bitmap_bytes_;
+    best_bytes_ += o.best_bytes_;
+    for (auto i = 0U; i != reached_decile_.size(); ++i) {
+      reached_decile_[i] += o.reached_decile_[i];
+    }
+  }
+
+  std::string json() const {
+    return fmt::format(
+        "{{\"stops_with_egress\":{},\"stops_reached\":{},\"links_total\":{},"
+        "\"links_within_cap\":{},\"links_improved\":{},\"rows\":{},"
+        "\"reached_cells\":{},\"dense_bytes\":{},\"bitmap_bytes\":{},"
+        "\"best_bytes\":{},\"reached_decile\":[{}]}}",
+        stops_with_egress_, stops_reached_, links_total_, links_within_cap_,
+        links_improved_, rows_, reached_cells_, dense_bytes_, bitmap_bytes_,
+        best_bytes_, fmt::join(reached_decile_, ","));
+  }
+};
+
+// --row-digest: per record, wyhash (cista::hash) chained over the bytes a
+// version-1 stream record holds (u32 origin, travel times, then the optional
+// transfers and egress-stop blocks). Records are combined by a wrapping sum
+// and an xor, so the digest does not depend on thread completion order.
+struct row_digest_t {
+  std::uint64_t sum_{};
+  std::uint64_t xor_{};
+  std::uint64_t records_{};
+
+  template <typename T>
+  static std::string_view bytes(std::vector<T> const& v) {
+    return {reinterpret_cast<char const*>(v.data()), v.size() * sizeof(T)};
+  }
+
+  template <typename T>
+  void add(std::uint32_t const o,
+           std::vector<T> const& tt,
+           std::vector<std::uint8_t> const& tr,
+           std::vector<std::uint32_t> const& via) {
+    auto h = cista::hash(
+        std::string_view{reinterpret_cast<char const*>(&o), sizeof(o)});
+    h = cista::hash(bytes(tt), h);
+    if (!tr.empty()) {
+      h = cista::hash(bytes(tr), h);
+    }
+    if (!via.empty()) {
+      h = cista::hash(bytes(via), h);
+    }
+    sum_ += h;
+    xor_ ^= h;
+    ++records_;
+  }
+
+  void merge(row_digest_t const& o) {
+    sum_ += o.sum_;
+    xor_ ^= o.xor_;
+    records_ += o.records_;
+  }
+};
+
 struct stream_header {
   char magic_[8]{'V', 'R', 'T', 'T', 'M', 'A', 'T', 'X'};
   std::uint32_t version_{kFormatVersion};
@@ -1901,6 +2017,11 @@ int cmd_route(args const& a) {
   auto const timing_path = a.str("timing-json", "");
   auto const discard =
       a.has("discard");  // timing-only: compute, write no records
+  // --egress-stats: count egress work and row occupancy (diagnostics only,
+  // outputs unchanged). --row-digest: order-independent digest of the records
+  // a stream would hold, also with --discard.
+  auto const egress_stats = a.has("egress-stats");
+  auto const row_digest = a.has("row-digest");
 
   // r5r-style outputs (--r5r-out DIR): per origin, over the departures of the
   // window, percentiles of travel time to each destination (ttm.bin) and, with
@@ -1945,6 +2066,10 @@ int cmd_route(args const& a) {
   }
   a.check_all_used();
   auto const conn_ms = ms_since(t_conn);
+  auto n_egress_stops = std::uint64_t{0U};
+  for (auto s = std::size_t{0U}; s + 1U < egress.begin_.size(); ++s) {
+    n_egress_stops += egress.begin_[s] != egress.begin_[s + 1U] ? 1U : 0U;
+  }
   for (auto const v : access.value_) {
     if (v >= tt.n_locations()) {
       throw std::runtime_error("access connector stop out of range");
@@ -1994,6 +2119,11 @@ int cmd_route(args const& a) {
   auto reuse_init_ns = std::atomic_uint64_t{0U};
   auto reuse_scan_ns = std::atomic_uint64_t{0U};
   auto reuse_finish_ns = std::atomic_uint64_t{0U};
+  auto init_ns = std::atomic_uint64_t{0U};
+  auto digest_ns = std::atomic_uint64_t{0U};
+  auto stats_mutex = std::mutex{};
+  auto stats = egress_stats_t{};
+  auto digest = row_digest_t{};
   auto const t_route = clock_t_::now();
 
   auto r5r = std::optional<r5r_output>{};
@@ -2004,9 +2134,11 @@ int cmd_route(args const& a) {
 
   // The travel-time buffer uses the narrowest record type (u8 for caps <= 253,
   // else u16): the egress loop is memory-bound and a u16 buffer slowed it by
-  // ~70 %.
-  auto worker_t = [&](auto const type_tag) {
+  // ~70 %. The stats tag selects, at compile time, whether the egress loop
+  // counts its work (--egress-stats); without it the loop has no counters.
+  auto worker_t = [&](auto const type_tag, auto const stats_tag) {
     using tt_t = std::decay_t<decltype(type_tag)>;
+    constexpr auto kStats = decltype(stats_tag)::value;
     auto rctx = reuse_ctx{};
     auto range_out = n::routing::raptor_state{};
     constexpr auto kUnreachableT = std::numeric_limits<tt_t>::max();
@@ -2014,11 +2146,20 @@ int cmd_route(args const& a) {
     auto tt_buf = std::vector<tt_t>(block);
     auto tr_buf = std::vector<std::uint8_t>(with_transfers ? block : 0U);
     auto via_buf = std::vector<std::uint32_t>(with_via ? block : 0U);
+    auto st = egress_stats_t{};
+    auto dg = row_digest_t{};
+    auto my_init_ns = std::uint64_t{0U};
+    auto my_digest_ns = std::uint64_t{0U};
     for (auto oi = next++; oi < origin_list.size(); oi = next++) {
       auto const o = origin_list[oi];
+      auto const ti = clock_t_::now();
       std::fill(begin(tt_buf), end(tt_buf), kUnreachableT);
       std::fill(begin(tr_buf), end(tr_buf), kUnreachable);
       std::fill(begin(via_buf), end(via_buf), kNoStop);
+      my_init_ns += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              clock_t_::now() - ti)
+              .count());
       auto starts = std::vector<n::routing::offset>{};
       for (auto j = access.begin_[o]; j != access.begin_[o + 1U]; ++j) {
         starts.emplace_back(
@@ -2132,6 +2273,10 @@ int cmd_route(args const& a) {
             if (best == std::numeric_limits<std::int64_t>::max()) {
               continue;
             }
+            if constexpr (kStats) {
+              ++st.stops_reached_;
+              st.links_total_ += egress.begin_[s + 1U] - egress.begin_[s];
+            }
             for (auto j = egress.begin_[s]; j != egress.begin_[s + 1U]; ++j) {
               auto const d = egress.value_[j];
               auto const total = best + egress.minutes_[j];
@@ -2141,6 +2286,9 @@ int cmd_route(args const& a) {
               if (total > max_travel) {
                 continue;
               }
+              if constexpr (kStats) {
+                ++st.links_within_cap_;
+              }
               // Lexicographic (travel time, transfers); a tie with a direct
               // walk keeps the walk (stock reports both, the reduction takes
               // the walk on ties).
@@ -2149,16 +2297,34 @@ int cmd_route(args const& a) {
                   (row_tr != nullptr && total == row_tt[d] &&
                    row_tr[d] != kDirectWalk && transfers < row_tr[d]);
               if (better) {
+                if constexpr (kStats) {
+                  ++st.links_improved_;
+                }
                 row_tt[d] = static_cast<tt_t>(total);
                 if (row_tr) row_tr[d] = transfers;
                 if (row_via) row_via[d] = s;
               }
             }
           }
+          if constexpr (kStats) {
+            st.stops_with_egress_ += n_egress_stops;
+          }
         }
         reduce_ns += static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 clock_t_::now() - tr)
+                .count());
+      }
+      if constexpr (kStats) {
+        st.add_rows(tt_buf.data(), dep_count, n_dests, kUnreachableT,
+                    with_transfers, with_via);
+      }
+      if (row_digest) {
+        auto const td = clock_t_::now();
+        dg.add(o, tt_buf, tr_buf, via_buf);
+        my_digest_ns += static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                clock_t_::now() - td)
                 .count());
       }
       auto const tw = clock_t_::now();
@@ -2187,12 +2353,24 @@ int cmd_route(args const& a) {
     reuse_init_ns += rctx.init_ns_;
     reuse_scan_ns += rctx.scan_ns_;
     reuse_finish_ns += rctx.finish_ns_;
+    init_ns += my_init_ns;
+    digest_ns += my_digest_ns;
+    auto const lock = std::lock_guard{stats_mutex};
+    stats.merge(st);
+    digest.merge(dg);
   };
   auto worker = [&]() {
+    auto const run = [&](auto const type_tag) {
+      if (egress_stats) {
+        worker_t(type_tag, std::true_type{});
+      } else {
+        worker_t(type_tag, std::false_type{});
+      }
+    };
     if (tt16) {
-      worker_t(std::uint16_t{});
+      run(std::uint16_t{});
     } else {
-      worker_t(std::uint8_t{});
+      run(std::uint8_t{});
     }
   };
   auto threads = std::vector<std::thread>{};
@@ -2230,7 +2408,7 @@ int cmd_route(args const& a) {
       "reusable_one_to_all\":{},"
       "\"pin_threads\":{},\"allowed_cpus\":\"{}\",\"range\":{},"
       "\"reuse_init_thread_ms\":{:.3f},\"reuse_scan_thread_ms\":{:.3f},\"reuse_"
-      "finish_thread_ms\":{:.3f}}}",
+      "finish_thread_ms\":{:.3f},\"row_init_thread_ms\":{:.3f}{}{}}}",
       kFormatVersion, target_stops ? "stops" : "dests", egress_rounds,
       origin_from, origin_to, n_dests, dep_count, n_threads, discard,
       max_travel, static_cast<int>(max_transfers), n_queries.load(), l.load_ms_,
@@ -2238,7 +2416,14 @@ int cmd_route(args const& a) {
       write_ns.load() / 1e6, peak_rss_kb(), tt.n_locations(), reuse_state,
       kHasReusableOneToAll<n::timetable>, pin_threads, fmt::join(cpus, " "),
       range, reuse_init_ns.load() / 1e6, reuse_scan_ns.load() / 1e6,
-      reuse_finish_ns.load() / 1e6);
+      reuse_finish_ns.load() / 1e6, init_ns.load() / 1e6,
+      row_digest ? fmt::format(",\"row_digest\":{{\"sum\":\"{:016x}\","
+                               "\"xor\":\"{:016x}\",\"records\":{},"
+                               "\"thread_ms\":{:.3f}}}",
+                               digest.sum_, digest.xor_, digest.records_,
+                               digest_ns.load() / 1e6)
+                 : std::string{},
+      egress_stats ? ",\"egress_stats\":" + stats.json() : std::string{});
   if (!timing_path.empty()) {
     auto tj = std::ofstream{timing_path};
     tj << json << '\n';
